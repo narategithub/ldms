@@ -341,7 +341,9 @@ void __ldms_free_ctxt(struct ldms_xprt *x, struct ldms_context *ctxt)
 		e->mean_us /= e->count;
 	}
 	ldms_xprt_put(ctxt->x);
-	free(ctxt);
+	/* XXX DEBUG, UNDO ME */
+	/* free(ctxt); */
+	ctxt->freed = 1;
 }
 
 static void send_dir_update(struct ldms_xprt *x,
@@ -729,6 +731,7 @@ static void process_dir_request(struct ldms_xprt *x, struct ldms_request *req)
 			x->zerrno = zerr;
 			x->log("%s: x %p: zap_send synchronous error. '%s'\n",
 			       __FUNCTION__, x, zap_err_str(zerr));
+			assert(0);
 		}
 		free(reply);
 		return;
@@ -781,6 +784,7 @@ static void process_dir_request(struct ldms_xprt *x, struct ldms_request *req)
 				x->zerrno = zerr;
 				x->log("%s: x %p: zap_send synchronous error. '%s'\n",
 				       __FUNCTION__, x, zap_err_str(zerr));
+				assert(0);
 			}
 			cnt = 0;
 			goto restart;
@@ -804,6 +808,7 @@ static void process_dir_request(struct ldms_xprt *x, struct ldms_request *req)
 				x->zerrno = zerr;
 				x->log("%s: x %p: zap_send synchronous error. '%s'\n",
 				       __FUNCTION__, x, zap_err_str(zerr));
+				assert(0);
 			}
 		}
 		ref_put(&set->ref, "__ldms_find_local_set");
@@ -1954,6 +1959,7 @@ static int ldms_xprt_recv_reply(struct ldms_xprt *x, struct ldms_reply *reply)
 	uint64_t xid = reply->hdr.xid;
 	struct ldms_context *ctxt;
 	ctxt = (struct ldms_context *)(unsigned long)xid;
+	assert(ctxt->freed == 0);
 	switch (cmd) {
 	case LDMS_CMD_PUSH_REPLY:
 		process_push_reply(x, reply, ctxt);
@@ -2273,6 +2279,8 @@ static void handle_zap_read_complete(zap_ep_t zep, zap_event_t ev)
 {
 	struct ldms_context *ctxt = ev->context;
 	struct ldms_xprt *x = zap_get_ucontext(zep);
+
+	assert(ctxt->freed == 0);
 
 	switch (ctxt->type) {
 	case LDMS_CONTEXT_UPDATE:
@@ -2704,6 +2712,11 @@ static void ldms_zap_cb(zap_ep_t zep, zap_event_t ev)
 	case ZAP_EVENT_CONNECTED:
 		(void)clock_gettime(CLOCK_REALTIME, &x->stats.connected);
 		__sync_fetch_and_add(&xprt_connect_count, 1);
+		if (1) {
+			struct sockaddr l, r;
+			socklen_t len;
+			ldms_xprt_sockaddr(x, &l, &r, &len); /* for debugging */
+		}
 		/* actively connected -- expecting conn_msg */
 		if (0 != __ldms_conn_msg_verify(x, ev->data, ev->data_len,
 					   rej_msg, sizeof(rej_msg))) {
