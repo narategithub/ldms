@@ -52,6 +52,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <assert.h>
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -829,6 +830,9 @@ post_send(struct z_rdma_ep *rep,
 			ctxt->wr.sg_list[0].addr;
 		msg->credits = htons(rep->lcl_rq_credits);
 		rep->lcl_rq_credits = 0;
+		clock_gettime(CLOCK_REALTIME, &msg->ts);
+		msg->msg_id = __sync_add_and_fetch(&rep->send_msg_id, 1);
+		msg->thr_id = pthread_self();
 	}
 	zap_err_t zrc = ZAP_ERR_OK;
 	rc = ibv_post_send(rep->qp, &ctxt->wr, bad_wr);
@@ -840,7 +844,7 @@ post_send(struct z_rdma_ep *rep,
 		     rep->rem_rq_credits);
 		zrc = ZAP_ERR_TRANSPORT;
 	} else {
-		DLOG("ibv_post_send() succeeded, rep %p\n", rep);
+		DLOG("ibv_post_send() succeeded, rep %p, len: %ld\n", rep, ctxt->sge[0].length);
 	}
 	return zrc;
 }
@@ -1098,6 +1102,8 @@ static zap_err_t z_rdma_connect(zap_ep_t ep,
 	if (zerr)
 		goto err_0;
 
+	rep->remote_sin = *(struct sockaddr_in*)sin;
+
 	zerr = ZAP_ERR_RESOURCE;
 	/* Create the connecting CM ID */
 	rc = rdma_create_id(rep->cm_channel, &rep->cm_id, rep, RDMA_PS_TCP);
@@ -1148,6 +1154,7 @@ static int __rdma_post_recv(struct z_rdma_ep *rep, struct z_rdma_buffer *rb)
 	}
 
 	sge.addr = (uint64_t) rb->msg->bytes;
+	bzero(rb->msg->bytes, sizeof(rb->msg->hdr));
 	sge.length = RQ_BUF_SZ;
 	assert(rep == rb->rep);
 	sge.lkey = rb->pool->mr->lkey;
@@ -1329,9 +1336,26 @@ static void process_recv_wc(struct z_rdma_ep *rep, struct ibv_wc *wc,
 	uint16_t msg_type;
 	int ret;
 
+	DLOG("rep<%p> RECV: %ld b\n", rep, wc->byte_len);
+
 	pthread_mutex_lock(&rep->credit_lock);
 	rep->rem_rq_credits += ntohs(msg->credits);
 	pthread_mutex_unlock(&rep->credit_lock);
+
+	if (msg->msg_id != -1) { /* ignore pure credit update message */
+		if (msg->msg_id - rep->prev_msg.msg_id > 1) {
+			/* message out of order */
+			LOG("rep<%p> Unexpected recv_msg_id "
+			    "(prev_msg: <%lu, %ld.%09ld, %lu>, "
+			    "current_msg: <%lu, %ld.%09ld, %lu>)\n",
+			    rep, rep->prev_msg.msg_id,
+			    rep->prev_msg.ts.tv_sec, rep->prev_msg.ts.tv_nsec,
+			    rep->prev_msg.thr_id,
+			    msg->msg_id, msg->ts.tv_sec, msg->ts.tv_nsec, msg->thr_id);
+		}
+		assert(msg->msg_id > rep->prev_msg.msg_id /* out of order */);
+		rep->prev_msg = *msg;
+	}
 
 	/*
 	 * If this was a credit update, there is no data to deliver
@@ -1706,6 +1730,7 @@ handle_connect_request(struct z_rdma_ep *rep, struct rdma_cm_event *event)
 	 *       to the other cm_channel when it is accepted by the application
 	 *       and get a thread assigned to it. */
 	new_rep->parent_ep = rep;
+	new_rep->remote_sin = *(struct sockaddr_in*)rdma_get_peer_addr(rep->cm_id);
 	if (0 == strncasecmp("hfi1", new_rep->cm_id->verbs->device->name, 4)) {
 		new_rep->dev_type = Z_RDMA_DEV_HFI1;
 	} else {
@@ -2151,6 +2176,10 @@ static int send_credit_update(struct z_rdma_ep *rep)
 
 	RDMA_SET_CONTEXT(&ctxt->wr, ctxt);
 
+	clock_gettime(CLOCK_REALTIME, &req->ts);
+	req->msg_id = -1;
+	req->thr_id = pthread_self();
+
 	if ((rc = ibv_post_send(rep->qp, &ctxt->wr, &bad_wr))) {
 		DLOG("ibv_post_send() failed, rc %d rep %p\n", rc, rep);
 		LOG( "%s: sq_credits %d lcl_rq_credits %d "
@@ -2167,7 +2196,7 @@ static int send_credit_update(struct z_rdma_ep *rep)
 		goto out;
 	} else {
 		credits = 0;
-		DLOG("ibv_post_send() succeeded, rep %p\n", rep);
+		DLOG("ibv_post_send() succeeded, rep %p, len: %ld\n", rep, ctxt->sge[0].length);
 	}
 	rc = 0;
 out:

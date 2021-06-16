@@ -52,6 +52,7 @@
 #include <infiniband/verbs.h>
 #include <rdma/rdma_cma.h>
 #include <semaphore.h>
+#include <time.h>
 #include "../zap.h"
 #include "../zap_priv.h"
 
@@ -77,6 +78,9 @@ enum z_rdma_message_type {
 struct z_rdma_message_hdr {
 	uint16_t credits;
 	uint16_t msg_type;
+	struct timespec ts;
+	uint64_t msg_id;
+	uint64_t thr_id;
 };
 
 struct z_rdma_share_msg {
@@ -264,6 +268,10 @@ struct z_rdma_ep {
 	pthread_cond_t io_q_cond;
 
 	struct z_rdma_epoll_ctxt cq_ctxt;
+
+	uint64_t send_msg_id;
+	struct sockaddr_in remote_sin;
+	struct z_rdma_message_hdr prev_msg;
 };
 
 typedef struct z_rdma_io_thread {

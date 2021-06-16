@@ -296,6 +296,8 @@ void __ldms_free_ctxt(struct ldms_xprt *x, struct ldms_context *ctxt)
 	struct timespec end;
 	ldms_stats_entry_t e = NULL;
 
+	assert(ctxt->freed == 0);
+
 	(void)clock_gettime(CLOCK_REALTIME, &end);
 	dur_us = ldms_timespec_diff_us(&ctxt->start, &end);
 
@@ -729,6 +731,7 @@ static void process_dir_request(struct ldms_xprt *x, struct ldms_request *req)
 			x->zerrno = zerr;
 			x->log("%s: x %p: zap_send synchronous error. '%s'\n",
 			       __FUNCTION__, x, zap_err_str(zerr));
+			assert(0);
 		}
 		free(reply);
 		return;
@@ -781,6 +784,7 @@ static void process_dir_request(struct ldms_xprt *x, struct ldms_request *req)
 				x->zerrno = zerr;
 				x->log("%s: x %p: zap_send synchronous error. '%s'\n",
 				       __FUNCTION__, x, zap_err_str(zerr));
+				assert(0);
 			}
 			cnt = 0;
 			goto restart;
@@ -804,6 +808,7 @@ static void process_dir_request(struct ldms_xprt *x, struct ldms_request *req)
 				x->zerrno = zerr;
 				x->log("%s: x %p: zap_send synchronous error. '%s'\n",
 				       __FUNCTION__, x, zap_err_str(zerr));
+				assert(0);
 			}
 		}
 		ref_put(&set->ref, "__ldms_find_local_set");
@@ -1961,6 +1966,7 @@ static int ldms_xprt_recv_reply(struct ldms_xprt *x, struct ldms_reply *reply)
 	uint64_t xid = reply->hdr.xid;
 	struct ldms_context *ctxt;
 	ctxt = (struct ldms_context *)(unsigned long)xid;
+	assert(ctxt->freed == 0);
 	switch (cmd) {
 	case LDMS_CMD_PUSH_REPLY:
 		process_push_reply(x, reply, ctxt);
@@ -2280,6 +2286,8 @@ static void handle_zap_read_complete(zap_ep_t zep, zap_event_t ev)
 {
 	struct ldms_context *ctxt = ev->context;
 	struct ldms_xprt *x = zap_get_ucontext(zep);
+
+	assert(ctxt->freed == 0);
 
 	switch (ctxt->type) {
 	case LDMS_CONTEXT_UPDATE:

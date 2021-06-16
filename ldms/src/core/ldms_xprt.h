@@ -343,6 +343,7 @@ struct ldms_context {
 	};
 	struct timespec start;
 	TAILQ_ENTRY(ldms_context) link;
+	int freed; /* XXX DELME, FOR DEBUGGING */
 };
 
 #define LDMS_MAX_TRANSPORT_NAME_LEN 16
