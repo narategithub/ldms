@@ -1874,7 +1874,8 @@ out:
 	/* Callback owns dir memory. */
 	ctxt->dir.cb((ldms_t)x, rc, rc ? NULL : dir, ctxt->dir.cb_arg);
 	json_entity_free(dir_entity);
-	json_parser_free(p);
+	if (p)
+		json_parser_free(p);
 	if (rc && dir)
 		ldms_xprt_dir_free(x, dir);
 	(void)clock_gettime(CLOCK_REALTIME, &end);
