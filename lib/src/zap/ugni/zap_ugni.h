@@ -64,8 +64,6 @@
 #include "zap.h"
 #include "zap_priv.h"
 
-#define UGNI_SOCKBUF_SZ 1024 * 1024
-
 /*
  * The length of the string
  * lcl=<local ip address:port> <--> rmt=<remote ip address:port>
@@ -384,6 +382,8 @@ struct z_ugni_ep {
 
 	LIST_ENTRY(z_ugni_ep) link;
 	LIST_ENTRY(z_ugni_ep) deferred_link;
+	TAILQ_ENTRY(z_ugni_ep) cq_uep_link;
+	int cq_uep;
 
 #if defined(ZAP_DEBUG) || defined(DEBUG)
 
@@ -414,20 +414,23 @@ struct z_ugni_ep {
 	int post_credit; /* post credit */
 
 	struct zap_ugni_msg *rmsg; /* current recv msg */
+
+	/* XXX endpoint log for debugging */
+#ifdef EP_LOG_ENABLED
+	FILE *log;
+#endif
 };
 
 /* NOTE: This is the maximum entire message length submitted to GNI_SmsgSend().
  * The `max_msg` length reported to the application is ZAP_UGNI_MSG_MAX -
  * `max_hdr_len`. */
-#define ZAP_UGNI_MSG_SZ_MAX 2048
+#define ZAP_UGNI_MSG_SZ_MAX 1024
 
-#define ZAP_UGNI_THREAD_EP_MAX 8192 /* max endpoints per thread */
+#define ZAP_UGNI_THREAD_EP_MAX (8) /* max endpoints per thread */
 #define ZAP_UGNI_EP_SQ_DEPTH 4
 #define ZAP_UGNI_EP_RQ_DEPTH 4
-#define ZAP_UGNI_SCQ_DEPTH (ZAP_UGNI_EP_SQ_DEPTH * ZAP_UGNI_THREAD_EP_MAX)
-#define ZAP_UGNI_RCQ_DEPTH (ZAP_UGNI_EP_RQ_DEPTH * ZAP_UGNI_THREAD_EP_MAX)
-#define ZAP_UGNI_EP_MBOX_SZ (ZAP_UGNI_EP_RQ_DEPTH * ZAP_UGNI_MSG_SZ_MAX)
-#define ZAP_UGNI_THR_MBOX_SZ (ZAP_UGNI_EP_MBOX_SZ * ZAP_UGNI_THREAD_EP_MAX)
+#define ZAP_UGNI_SCQ_DEPTH ((ZAP_UGNI_EP_SQ_DEPTH+2) * ZAP_UGNI_THREAD_EP_MAX)
+#define ZAP_UGNI_RCQ_DEPTH ((ZAP_UGNI_EP_RQ_DEPTH+2) * ZAP_UGNI_THREAD_EP_MAX)
 
 struct z_ugni_io_thread {
 	struct zap_io_thread zap_io_thread;
@@ -489,6 +492,8 @@ struct z_ugni_io_thread {
 	struct rbt zq; /* zap event queue, protected by zap_io_thread.mutex */
 	int zq_fd[2]; /* zap event queue fd (for epoll notification) */
 	struct z_ugni_epoll_ctxt zq_epoll_ctxt;
+
+	TAILQ_HEAD(, z_ugni_ep) cq_uep_list;
 };
 
 #endif

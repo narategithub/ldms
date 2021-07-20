@@ -564,7 +564,7 @@ static void prdcr_connect_cb(ldms_t x, ldms_xprt_event_t e, void *cb_arg)
 {
 	ldmsd_prdcr_t prdcr = cb_arg;
 	ldmsd_prdcr_lock(prdcr);
-	ldmsd_log(LDMSD_LINFO, "%s:%d Producer %s (%s %s:%d) conn_state: %d %s\n",
+	ldmsd_log(LDMSD_LDEBUG, "%s:%d Producer %s (%s %s:%d) conn_state: %d %s\n",
 				__func__, __LINE__,
 				prdcr->obj.name, prdcr->xprt_name,
 				prdcr->host_name, (int)prdcr->port_no,
@@ -674,7 +674,7 @@ static void prdcr_connect(ldmsd_prdcr_t prdcr)
 	case LDMSD_PRDCR_TYPE_ACTIVE:
 		prdcr->conn_state = LDMSD_PRDCR_STATE_CONNECTING;
 		prdcr->xprt = ldms_xprt_new_with_auth(prdcr->xprt_name,
-					ldmsd_linfo, prdcr->conn_auth,
+					ldmsd_lall, prdcr->conn_auth,
 					prdcr->conn_auth_args);
 		if (prdcr->xprt) {
 			ret  = ldms_xprt_connect(prdcr->xprt,
