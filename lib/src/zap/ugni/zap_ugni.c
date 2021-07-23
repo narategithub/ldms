@@ -74,7 +74,7 @@
 #include "coll/rbt.h"
 #include "mmalloc/mmalloc.h"
 
-#define EP_LOG_ENABLED
+// #define EP_LOG_ENABLED
 
 #include "zap_ugni.h"
 
@@ -398,19 +398,21 @@ static char *format_4tuple(struct zap_ep *ep, char *str, size_t len)
  *   get the updated data. When agg11+agg12 were killed/restarted, agg2 also get
  *   the updated data.
  */
-#define Z_GNI_API_GLOBAL_LOCK
-#if defined Z_GNI_API_THR_LOCK
-/* use io_thread lock */
-#define Z_GNI_API_LOCK(thr) pthread_mutex_lock(&(thr)->mutex)
-#define Z_GNI_API_UNLOCK(thr) pthread_mutex_unlock(&(thr)->mutex)
-#elif defined Z_GNI_API_GLOBAL_LOCK
-/* use global ugni_lock */
-#define Z_GNI_API_LOCK(thr) pthread_mutex_lock(&ugni_lock)
-#define Z_GNI_API_UNLOCK(thr) pthread_mutex_unlock(&ugni_lock)
-#else
-/* no GNI API lock */
-#define Z_GNI_API_LOCK(thr)
-#define Z_GNI_API_UNLOCK(thr)
+/* Z_GNI_API_LOCK_TYPE:
+ *   0: no lock
+ *   1: lock with global mutex (ugni_lock)
+ *   2: lock with thread mutex
+ */
+#define Z_GNI_API_LOCK_TYPE 1
+#if Z_GNI_API_LOCK_TYPE == 0 /* no GNI API lock */
+#  define Z_GNI_API_LOCK(thr)
+#  define Z_GNI_API_UNLOCK(thr)
+#elif Z_GNI_API_LOCK_TYPE == 1 /* use global ugni_lock */
+#  define Z_GNI_API_LOCK(thr)   pthread_mutex_lock(&ugni_lock)
+#  define Z_GNI_API_UNLOCK(thr) pthread_mutex_unlock(&ugni_lock)
+#elif Z_GNI_API_LOCK_TYPE == 2 /* use io_thread lock */
+#  define Z_GNI_API_LOCK(thr)   pthread_mutex_lock(&(thr)->mutex)
+#  define Z_GNI_API_UNLOCK(thr) pthread_mutex_unlock(&(thr)->mutex)
 #endif
 
 int init_complete = 0;
@@ -750,7 +752,7 @@ int z_ugni_io_thread_mbox_setup(struct z_ugni_io_thread *thr)
 	struct gni_smsg_attr attr = {0};
 
 	attr.msg_type = GNI_SMSG_TYPE_MBOX_AUTO_RETRANSMIT;
-	attr.mbox_maxcredit = ZAP_UGNI_EP_RQ_DEPTH + 2;
+	attr.mbox_maxcredit = ZAP_UGNI_MBOX_MAX_CREDIT+2;
 	attr.msg_maxsize = ZAP_UGNI_MSG_SZ_MAX;
 
 	/* size of mbox/ep */
@@ -2533,7 +2535,7 @@ static zap_err_t z_ugni_read(zap_ep_t ep, zap_map_t src_map, char *src,
 			EP_LOG(uep, "error read %p\n", wr);
 			LOG_(uep, "%s: GNI_PostRdma() failed, grc: %s\n",
 					__func__, gni_ret_str(grc));
-			assert(0);
+			assert(0); /* GNI_PostRdma() */
 			z_ugni_ep_error(uep);
 #ifdef DEBUG
 			__sync_sub_and_fetch(&ugni_io_count, 1);
@@ -2725,12 +2727,14 @@ static int z_ugni_submit_pending(struct z_ugni_ep *uep)
 	switch (wr->type) {
 	case Z_UGNI_WR_RDMA:
 		Z_GNI_API_LOCK(uep->ep.thread);
+		#ifdef EP_LOG_ENABLED
 		const char *op = "UNKNOWN";
 		if (wr->post_desc->post.type == GNI_POST_RDMA_GET) {
 			op = "read";
 		} else if (wr->post_desc->post.type == GNI_POST_RDMA_PUT) {
 			op = "write";
 		}
+		#endif
 		EP_LOG(uep, "resume %s %p\n", op, wr);
 		grc = GNI_PostRdma(uep->gni_ep, &wr->post_desc->post);
 		Z_GNI_API_UNLOCK(uep->ep.thread);
@@ -2802,12 +2806,14 @@ static int z_ugni_handle_scq_rdma(struct z_ugni_io_thread *thr, gni_cq_entry_t c
 	ATOMIC_INC(&stat.scq_rdma_completed, 1);
 	desc = (void*)post;
 	wr = __container_of(desc, struct z_ugni_wr, post_desc);
+	#ifdef EP_LOG_ENABLED
 	const char *op = "UNKNOWN";
 	if (wr->post_desc->post.type == GNI_POST_RDMA_GET) {
 		op = "read";
 	} else if (wr->post_desc->post.type == GNI_POST_RDMA_PUT) {
 		op = "write";
 	}
+	#endif
 	if (wr->state == Z_UGNI_WR_STALLED) {
 		/*
 		 * The descriptor is in the stalled state.
@@ -3985,7 +3991,7 @@ zap_err_t z_ugni_io_thread_ep_assign(zap_io_thread_t t, zap_ep_t ep)
 	uep->local_smsg_attr.msg_buffer = thr->mbox;
 	uep->local_smsg_attr.buff_size = thr->mbox_sz;
 	uep->local_smsg_attr.mem_hndl = thr->mbox_mh;
-	uep->local_smsg_attr.mbox_maxcredit = ZAP_UGNI_EP_RQ_DEPTH+2;
+	uep->local_smsg_attr.mbox_maxcredit = ZAP_UGNI_MBOX_MAX_CREDIT;
 	uep->local_smsg_attr.msg_maxsize = ZAP_UGNI_MSG_SZ_MAX;
 	uep->local_smsg_attr.mbox_offset = thr->mbox_sz * uep->ep_idx->idx;
 
@@ -3994,7 +4000,10 @@ zap_err_t z_ugni_io_thread_ep_assign(zap_io_thread_t t, zap_ep_t ep)
 
 	/* allocate GNI ednpoint. We need to do it here instead of zap_new()
 	 * because we don't know which cq to attached to yet. */
+
+	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	grc = GNI_EpCreate(_dom.nic, thr->scq, &uep->gni_ep);
+	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (grc) {
 		LOG("GNI_EpCreate() failed: %s\n", gni_ret_str(grc));
 		zerr = ZAP_ERR_RESOURCE;
