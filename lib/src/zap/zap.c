@@ -720,11 +720,14 @@ int zap_term(zap_t z, int timeout_sec)
 
 int zap_io_thread_init(zap_io_thread_t t, zap_t z, const char *name, int stat_window)
 {
+	pthread_mutexattr_t mattr;
 	t->stat = zap_thrstat_new(name, stat_window);
 	if (!t->stat)
 		return errno;
 	t->zap = z;
-	pthread_mutex_init(&t->mutex, NULL);
+	pthread_mutexattr_init(&mattr);
+	pthread_mutexattr_settype(&mattr, PTHREAD_MUTEX_RECURSIVE);
+	pthread_mutex_init(&t->mutex, &mattr);
 	LIST_INIT(&t->_ep_list);
 	t->_n_ep = 0;
 	return 0;

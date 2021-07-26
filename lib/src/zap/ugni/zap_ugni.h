@@ -286,7 +286,7 @@ struct z_ugni_sock_msg_conn_accept {
 #define UGNI_WR_F_SEND_MAPPED 0x4
 
 struct zap_ugni_send_wr {
-	STAILQ_ENTRY(zap_ugni_send_wr) link;
+	TAILQ_ENTRY(zap_ugni_send_wr) link;
 	void  *ctxt; /* for send_mapped completion */
 	int    flags; /* various wr flags */
 	uint32_t msg_id; /* ep_idx(16-bit)|smsg_seq(16-bit) */
@@ -322,7 +322,8 @@ struct zap_ugni_post_desc {
 };
 
 struct z_ugni_wr {
-	STAILQ_ENTRY(z_ugni_wr) entry;
+	TAILQ_ENTRY(z_ugni_wr) entry;
+	uint64_t seq; /* wr sequence number */
 	enum {
 		Z_UGNI_WR_RDMA,
 		Z_UGNI_WR_SMSG,
@@ -339,7 +340,7 @@ struct z_ugni_wr {
 	};
 };
 
-STAILQ_HEAD(z_ugni_wrq, z_ugni_wr);
+TAILQ_HEAD(z_ugni_wrq, z_ugni_wr);
 
 /* zap event entry primarily for deferred event */
 struct z_ugni_ev {
@@ -409,10 +410,6 @@ struct z_ugni_ep {
 	int sock_off; /* offset into sock_buff */
 
 	struct z_ugni_ep_idx *ep_idx;
-	struct z_ugni_wrq pending_wrq;
-	struct z_ugni_wrq submitted_wrq;
-	int post_credit; /* post credit */
-
 	struct zap_ugni_msg *rmsg; /* current recv msg */
 
 	/* XXX endpoint log for debugging */
@@ -495,6 +492,14 @@ struct z_ugni_io_thread {
 	struct z_ugni_epoll_ctxt zq_epoll_ctxt;
 
 	TAILQ_HEAD(, z_ugni_ep) cq_uep_list;
+
+	/* these are protected by zap_io_thread.mutex */
+	struct z_ugni_wrq pending_wrq;
+	struct z_ugni_wrq submitted_wrq;
+	struct z_ugni_wrq out_of_order_wrq;
+	int post_credit; /* post credit */
+	uint64_t wr_seq; /* wr sequence number */
+
 };
 
 #endif
