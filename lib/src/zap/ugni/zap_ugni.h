@@ -420,7 +420,7 @@ struct z_ugni_ep {
 	 * These are for controlling on-the-wire outstanding requests per
 	 * endpoint. The main objective is to control smsg send.
 	 *
-	 * TODO CONTINUE HERE ...
+	 * TODO Shall we control the post pressure per endoint?
 	 */
 	struct z_ugni_wrq pending_wrq;
 	int post_credit; /* post credit */
@@ -437,7 +437,7 @@ struct z_ugni_ep {
 #define ZAP_UGNI_MBOX_MAX_CREDIT (ZAP_UGNI_EP_RQ_DEPTH)
 #define ZAP_UGNI_SCQ_DEPTH ((2*ZAP_UGNI_EP_SQ_DEPTH) * ZAP_UGNI_THREAD_EP_MAX)
 #define ZAP_UGNI_RCQ_DEPTH ((2*ZAP_UGNI_MBOX_MAX_CREDIT) * ZAP_UGNI_THREAD_EP_MAX)
-#define ZAP_UGNI_POST_CREDIT (ZAP_UGNI_RCQ_DEPTH/4)
+#define ZAP_UGNI_POST_CREDIT (2*ZAP_UGNI_EP_SQ_DEPTH)
 
 struct z_ugni_io_thread {
 	struct zap_io_thread zap_io_thread;

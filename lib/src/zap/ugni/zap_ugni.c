@@ -541,6 +541,8 @@ static void z_ugni_deliver_conn_error(struct z_ugni_ep *uep);
 static void z_ugni_ep_release(struct z_ugni_ep *uep);
 static void z_ugni_zq_try_post(struct z_ugni_ep *uep, uint64_t ts_msec, int type, int status);
 
+static void z_ugni_io_thread_wakeup(struct z_ugni_io_thread *thr);
+
 static void zap_ugni_default_log(const char *fmt, ...)
 {
 	va_list ap;
@@ -1325,6 +1327,8 @@ static zap_err_t z_ugni_smsg_send(struct z_ugni_ep *uep, zap_ugni_msg_t msg,
 		goto err;
 
 	EP_THR_LOCK(uep);
+	goto pending;
+
 	if (!z_ugni_get_post_credit(thr))
 		goto pending;
 
@@ -1356,6 +1360,7 @@ static zap_err_t z_ugni_smsg_send(struct z_ugni_ep *uep, zap_ugni_msg_t msg,
 	wr->state = Z_UGNI_WR_PENDING;
 	TAILQ_INSERT_TAIL(&thr->pending_wrq, wr, entry);
 	wr->seq = thr->wr_seq++;
+	z_ugni_io_thread_wakeup(thr);
 	EP_LOG(uep, "pending send %p\n", wr);
 	CONN_LOG("%p pending smsg %s\n", uep, zap_ugni_msg_type_str(ntohs(msg->hdr.msg_type)));
  out:
@@ -2559,7 +2564,7 @@ static zap_err_t z_ugni_read(zap_ep_t ep, zap_map_t src_map, char *src,
 #endif /* DEBUG */
 
 	EP_THR_LOCK(uep);
-	if (z_ugni_get_post_credit(thr)) {
+	if (0 && z_ugni_get_post_credit(thr)) {
 		Z_GNI_API_LOCK(uep->ep.thread);
 		grc = GNI_PostRdma(uep->gni_ep, &desc->post);
 		Z_GNI_API_UNLOCK(uep->ep.thread);
@@ -2587,6 +2592,7 @@ static zap_err_t z_ugni_read(zap_ep_t ep, zap_map_t src_map, char *src,
 		/* no post credit, add to the pending list */
 		wr->state = Z_UGNI_WR_PENDING;
 		TAILQ_INSERT_TAIL(&thr->pending_wrq, wr, entry);
+		z_ugni_io_thread_wakeup(thr);
 		EP_LOG(uep, "pending read %p\n", wr);
 	}
 	wr->seq = thr->wr_seq++;
@@ -2660,7 +2666,7 @@ static zap_err_t z_ugni_write(zap_ep_t ep, zap_map_t src_map, char *src,
 	__sync_fetch_and_add(&ugni_io_count, 1);
 #endif /* DEBUG */
 	EP_THR_LOCK(uep);
-	if (z_ugni_get_post_credit(thr)) {
+	if (0 && z_ugni_get_post_credit(thr)) {
 		Z_GNI_API_LOCK(uep->ep.thread);
 		grc = GNI_PostRdma(uep->gni_ep, &desc->post);
 		Z_GNI_API_UNLOCK(uep->ep.thread);
@@ -2687,6 +2693,7 @@ static zap_err_t z_ugni_write(zap_ep_t ep, zap_map_t src_map, char *src,
 		/* no post credit, add to the pending list */
 		wr->state = Z_UGNI_WR_PENDING;
 		TAILQ_INSERT_TAIL(&thr->pending_wrq, wr, entry);
+		z_ugni_io_thread_wakeup(thr);
 		EP_LOG(uep, "pending write %p\n", wr);
 	}
 	wr->seq = thr->wr_seq++;
@@ -3642,6 +3649,12 @@ static void z_ugni_handle_sock_event(struct z_ugni_ep *uep, int events)
 	__put_ep(&uep->ep, "sock_event");
 }
 
+static void z_ugni_io_thread_wakeup(struct z_ugni_io_thread *thr)
+{
+	static const char c = 1;
+	write(thr->zq_fd[1], &c, 1);
+}
+
 static void z_ugni_zq_post(struct z_ugni_io_thread *thr, struct z_ugni_ev *uev)
 {
 	static const char c = 1;
@@ -3786,7 +3799,7 @@ static void *z_ugni_io_thread_proc(void *arg)
 	pthread_cleanup_push(z_ugni_io_thread_cleanup, thr);
 
  loop:
-	timeout = z_ugni_handle_zq_events(thr, ev[i].events);
+	timeout = z_ugni_handle_zq_events(thr, 0);
 	zap_thrstat_wait_start(thr->zap_io_thread.stat);
 	n = epoll_wait(thr->efd, ev, N_EV, timeout);
 	zap_thrstat_wait_end(thr->zap_io_thread.stat);
