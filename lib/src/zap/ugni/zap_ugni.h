@@ -416,6 +416,14 @@ struct z_ugni_ep {
 #ifdef EP_LOG_ENABLED
 	FILE *log;
 #endif
+	/*
+	 * These are for controlling on-the-wire outstanding requests per
+	 * endpoint. The main objective is to control smsg send.
+	 *
+	 * TODO CONTINUE HERE ...
+	 */
+	struct z_ugni_wrq pending_wrq;
+	int post_credit; /* post credit */
 };
 
 /* NOTE: This is the maximum entire message length submitted to GNI_SmsgSend().
@@ -425,10 +433,11 @@ struct z_ugni_ep {
 
 #define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
 #define ZAP_UGNI_EP_SQ_DEPTH 16
-#define ZAP_UGNI_EP_RQ_DEPTH 4
+#define ZAP_UGNI_EP_RQ_DEPTH 16
 #define ZAP_UGNI_MBOX_MAX_CREDIT (ZAP_UGNI_EP_RQ_DEPTH)
-#define ZAP_UGNI_SCQ_DEPTH (ZAP_UGNI_EP_SQ_DEPTH * ZAP_UGNI_THREAD_EP_MAX)
-#define ZAP_UGNI_RCQ_DEPTH (4 * ZAP_UGNI_MBOX_MAX_CREDIT * ZAP_UGNI_THREAD_EP_MAX)
+#define ZAP_UGNI_SCQ_DEPTH ((2*ZAP_UGNI_EP_SQ_DEPTH) * ZAP_UGNI_THREAD_EP_MAX)
+#define ZAP_UGNI_RCQ_DEPTH ((2*ZAP_UGNI_MBOX_MAX_CREDIT) * ZAP_UGNI_THREAD_EP_MAX)
+#define ZAP_UGNI_POST_CREDIT (ZAP_UGNI_RCQ_DEPTH/4)
 
 struct z_ugni_io_thread {
 	struct zap_io_thread zap_io_thread;
@@ -493,12 +502,16 @@ struct z_ugni_io_thread {
 
 	TAILQ_HEAD(, z_ugni_ep) cq_uep_list;
 
-	/* these are protected by zap_io_thread.mutex */
+	/*
+	 * These are protected by zap_io_thread.mutex.
+	 * These tail queues are used to prevent CQ overrun and are used for
+	 * handling out-of-order completions. */
 	struct z_ugni_wrq pending_wrq;
 	struct z_ugni_wrq submitted_wrq;
 	struct z_ugni_wrq out_of_order_wrq;
-	int post_credit; /* post credit */
+	int post_credit; /* post credit to prevent cq overrun */
 	uint64_t wr_seq; /* wr sequence number */
+	/* ---------------------------------------- */
 
 };
 

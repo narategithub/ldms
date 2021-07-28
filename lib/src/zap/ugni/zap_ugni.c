@@ -771,7 +771,7 @@ int z_ugni_io_thread_mbox_setup(struct z_ugni_io_thread *thr)
 		errno = gni_rc_to_errno(grc);
 		goto err_0;
 	}
-	sz *= 2;
+	sz += ZAP_UGNI_MSG_SZ_MAX * ZAP_UGNI_MBOX_MAX_CREDIT;
 	thr->mbox_sz = ((sz - 1)|0x3f) + 1; /* align to cache line: 64 bytes */
 	/* allocate mailboxes serving endpoints in this thread */
 	sz = ZAP_UGNI_THREAD_EP_MAX * thr->mbox_sz;
@@ -3847,7 +3847,7 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	TAILQ_INIT(&thr->stalled_wrq);
 	rbt_init(&thr->zq, zqe_cmp);
 
-	thr->post_credit = ZAP_UGNI_EP_RQ_DEPTH;
+	thr->post_credit = ZAP_UGNI_POST_CREDIT;
 	TAILQ_INIT(&thr->pending_wrq);
 	TAILQ_INIT(&thr->submitted_wrq);
 	TAILQ_INIT(&thr->out_of_order_wrq);
@@ -3877,10 +3877,7 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	/* For local/source completions (sends/posts) */
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	CONN_LOG("send CqCreate ...\n");
-	size_t scq_sz;
-	scq_sz = 16*(ZAP_UGNI_SCQ_DEPTH + ZAP_UGNI_RCQ_DEPTH);
-	scq_sz = 1024*1024;
-	rc = GNI_CqCreate(_dom.nic, scq_sz, 0, GNI_CQ_BLOCKING, NULL, NULL, &thr->scq);
+	rc = GNI_CqCreate(_dom.nic, ZAP_UGNI_SCQ_DEPTH, 0, GNI_CQ_BLOCKING, NULL, NULL, &thr->scq);
 	CONN_LOG("send CqCreate ... done.\n");
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc != GNI_RC_SUCCESS) {
