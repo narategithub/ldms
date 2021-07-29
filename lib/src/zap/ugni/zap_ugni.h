@@ -324,6 +324,7 @@ struct zap_ugni_post_desc {
 struct z_ugni_wr {
 	TAILQ_ENTRY(z_ugni_wr) entry;
 	uint64_t seq; /* wr sequence number */
+	struct z_ugni_ep *uep;
 	enum {
 		Z_UGNI_WR_RDMA,
 		Z_UGNI_WR_SMSG,
@@ -420,7 +421,8 @@ struct z_ugni_ep {
 	 * These are for controlling on-the-wire outstanding requests per
 	 * endpoint. The main objective is to control smsg send.
 	 *
-	 * TODO Shall we control the post pressure per endoint?
+	 * NOTE: The pending list and the credit is protected by the THR_LOCK,
+	 *       not the EP_LOCK.
 	 */
 	struct z_ugni_wrq pending_wrq;
 	int post_credit; /* post credit */
@@ -432,12 +434,13 @@ struct z_ugni_ep {
 #define ZAP_UGNI_MSG_SZ_MAX 1024
 
 #define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
-#define ZAP_UGNI_EP_SQ_DEPTH 16
-#define ZAP_UGNI_EP_RQ_DEPTH 16
+#define ZAP_UGNI_EP_SQ_DEPTH 8
+#define ZAP_UGNI_EP_RQ_DEPTH 8
+#define ZAP_UGNI_EP_POST_CREDIT ZAP_UGNI_EP_SQ_DEPTH
 #define ZAP_UGNI_MBOX_MAX_CREDIT (ZAP_UGNI_EP_RQ_DEPTH)
 #define ZAP_UGNI_SCQ_DEPTH ((2*ZAP_UGNI_EP_SQ_DEPTH) * ZAP_UGNI_THREAD_EP_MAX)
 #define ZAP_UGNI_RCQ_DEPTH ((2*ZAP_UGNI_MBOX_MAX_CREDIT) * ZAP_UGNI_THREAD_EP_MAX)
-#define ZAP_UGNI_POST_CREDIT (2*ZAP_UGNI_EP_SQ_DEPTH)
+#define ZAP_UGNI_POST_CREDIT ZAP_UGNI_SCQ_DEPTH
 
 struct z_ugni_io_thread {
 	struct zap_io_thread zap_io_thread;
