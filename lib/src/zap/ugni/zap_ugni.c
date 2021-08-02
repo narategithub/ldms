@@ -442,7 +442,9 @@ struct z_ugni_debug_stat {
 	int rcq_smsg_success;
 	int rcq_smsg_not_done;
 	int rcq_success;
-	int rcq_not_done;
+	int rcq_rc_not_done;
+	int active_smsg;
+	int active_rdma;
 } stat = {0};
 
 
@@ -2745,6 +2747,7 @@ static int z_ugni_submit_pending(struct z_ugni_io_thread *thr)
 			goto err;
 		}
 		ATOMIC_INC(&stat.scq_rdma_submitted, 1);
+		ATOMIC_INC(&stat.active_rdma, 1);
 		EP_LOG(uep, "post %s %p\n", op, wr);
 		break;
 	case Z_UGNI_WR_SMSG:
@@ -2768,6 +2771,7 @@ static int z_ugni_submit_pending(struct z_ugni_io_thread *thr)
 			goto err;
 		}
 		ATOMIC_INC(&stat.scq_smsg_submitted, 1);
+		ATOMIC_INC(&stat.active_smsg, 1);
 		EP_LOG(uep, "post send %p\n", wr);
 		CONN_LOG("%p sent pending smsg %s\n", uep, zap_ugni_msg_type_str(ntohs(wr->send_wr->msg->hdr.msg_type)));
 		break;
@@ -2793,7 +2797,7 @@ static int z_ugni_submit_pending(struct z_ugni_io_thread *thr)
 		     "  stat.rcq_smsg_success: %d\n"
 		     "  stat.rcq_smsg_not_done: %d\n"
 		     "  stat.rcq_success: %d\n"
-		     "  stat.rcq_not_done: %d\n",
+		     "  stat.rcq_rc_not_done: %d\n",
 		     stat.scq_smsg_submitted,
 		     stat.scq_smsg_completed,
 		     stat.scq_rdma_submitted,
@@ -2801,7 +2805,7 @@ static int z_ugni_submit_pending(struct z_ugni_io_thread *thr)
 		     stat.rcq_smsg_success,
 		     stat.rcq_smsg_not_done,
 		     stat.rcq_success,
-		     stat.rcq_not_done);
+		     stat.rcq_rc_not_done);
 	}
 	return 0;
  err:
@@ -2826,6 +2830,7 @@ static int z_ugni_handle_scq_rdma(struct z_ugni_io_thread *thr,
 		return -1;
 	}
 	ATOMIC_INC(&stat.scq_rdma_completed, 1);
+	ATOMIC_INC(&stat.active_rdma, -1);
 	desc = (void*)post;
 	wr = __container_of(desc, struct z_ugni_wr, post_desc);
 	*_wr = wr;
@@ -2984,6 +2989,7 @@ static int z_ugni_handle_scq_smsg(struct z_ugni_io_thread *thr,
 		goto err;
 	}
 	ATOMIC_INC(&stat.scq_smsg_completed, 1);
+	ATOMIC_INC(&stat.active_smsg, -1);
 	grc = GNI_CQ_GET_STATUS(cqe);
 	EP_LOG(uep, "complete send %p (grc: %d)\n", wr, grc);
 	int msg_type = ntohs(wr->send_wr->msg->hdr.msg_type);
@@ -3031,7 +3037,7 @@ static void z_ugni_handle_rcq_events(struct z_ugni_io_thread *thr)
 	grc = GNI_CqGetEvent(thr->rcq, &cqe);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (grc == GNI_RC_NOT_DONE) {
-		ATOMIC_INC(&stat.rcq_not_done, 1);
+		ATOMIC_INC(&stat.rcq_rc_not_done, 1);
 		goto out;
 	}
 	if (grc != GNI_RC_SUCCESS) {
