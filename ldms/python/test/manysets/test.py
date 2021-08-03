@@ -51,13 +51,18 @@ psr.add_argument("-n", "--num-sets", default=1024, type=int,
                  help="The number of sets to test (default=1024)")
 psr.add_argument("-i", "--interval", default=1.0, type=float,
                  help="Interval (1.0 sec)")
+psr.add_argument("-l", "--listen", metavar='XPRT:HOST:PORT', default=None, type=str,
+                 help="Listen to 'XPRT:HOST:PORT' (take precedence over -x,-p,-h)")
+psr.add_argument("-c", "--connect", metavar='XPRT:HOST:PORT', default=None, type=str,
+                 help="Connect to the given 'XPRT:HOST:PORT' (overrides -x,-p,-h)")
+psr.add_argument("-o", "--offset", metavar="FLOAT_SEC", default=0.0, type=float,
+                 help="Update offset (default: 0.00)")
 psr.add_argument("-?", "--help", action="help",
                  help="Show help message")
 g = psr.parse_args()
 g.num_metrics = 16
 ldms.init(g.num_sets * 2048) # 2K/set should be plenty
 
-g.x = ldms.Xprt(name=g.xprt)
 g.sets = dict()
 g.cond = thread.Condition()
 g.num_lookups = 0
@@ -96,6 +101,9 @@ def verify_set(s):
 def server_cb(x, ev, arg):
     pass # no-op
 
+def listen_cb(x, ev, arg):
+    pass # no-op
+
 def interval_block(interval, offset):
         t0 = time.time()
         t1 = (t0 + interval)//interval*interval + offset
@@ -103,6 +111,9 @@ def interval_block(interval, offset):
         time.sleep(dt)
 
 def server_proc():
+    if g.listen:
+        g.xprt, g.host, g.port = g.listen.split(":")
+    g.x = ldms.Xprt(name=g.xprt)
     # create, initialize and publish sets
     for i in range(g.num_sets):
         name = "set_{:06d}".format(i+1)
@@ -117,7 +128,7 @@ def server_proc():
 
     # periodically sample sets
     while True:
-        interval_block(g.interval, 0)
+        interval_block(g.interval, g.offset)
         for s in g.sets.values():
             sample(s)
 
@@ -176,7 +187,15 @@ def client_update_cb(lset, flags, arg):
         g.cond.release()
 
 def client_proc():
+    # async listen
+    if g.listen:
+        _xprt, _host, _port = g.listen.split(":")
+        _x = ldms.Xprt(name = _xprt)
+        _x.listen(host=_host, port=_port, cb=listen_cb, cb_arg=None)
+    if g.connect:
+        g.xprt, g.host, g.port = g.connect.split(":")
     # async connect
+    g.x = ldms.Xprt(name=g.xprt)
     g.x.connect(host=g.host, port=g.port, cb=client_cb, cb_arg=None)
     # wait for lookup
     g.cond.acquire()
@@ -188,7 +207,7 @@ def client_proc():
 
     # periodically update sets
     while True:
-        interval_block(g.interval, 0.2)
+        interval_block(g.interval, g.offset)
         g.num_updates = 0
         for s in g.sets.values():
             s.update(client_update_cb, None)
