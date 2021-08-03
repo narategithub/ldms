@@ -434,7 +434,7 @@ zap_mem_info_fn_t __mem_info_fn = NULL;
 /* some debugging statistics */
 #define ATOMIC_INC(PTR, V) __atomic_add_fetch(PTR, V, __ATOMIC_SEQ_CST)
 
-struct z_ugni_debug_stat {
+static struct z_ugni_debug_stat {
 	int scq_smsg_submitted;
 	int scq_smsg_completed;
 	int scq_rdma_submitted;
@@ -445,7 +445,7 @@ struct z_ugni_debug_stat {
 	int rcq_rc_not_done;
 	int active_smsg;
 	int active_rdma;
-} stat = {0};
+} z_ugni_stat = {0};
 
 
 
@@ -530,7 +530,8 @@ static struct zap_ugni_dom {
 	uint8_t ptag;
 	uint32_t cookie;
 	uint32_t pe_addr;
-	uint32_t inst_id;
+	union z_ugni_inst_id_u inst_id; /* id for RDMA endpoint */
+	union z_ugni_inst_id_u smsg_id; /* id for SMSG endpoint */
 	gni_job_limits_t limits;
 	gni_cdm_handle_t cdm;
 	gni_nic_handle_t nic;
@@ -593,6 +594,40 @@ int gni_rc_to_errno(gni_return_t grc)
         case GNI_RC_ERROR_NOMEM: return ENOMEM;
 	}
 	return EINVAL;
+}
+
+const char *gni_ev_str(int ev_type)
+{
+	switch (ev_type) {
+	case GNI_CQ_EVENT_TYPE_POST:
+		return "GNI_CQ_EVENT_TYPE_POST";
+	case GNI_CQ_EVENT_TYPE_SMSG:
+		return "GNI_CQ_EVENT_TYPE_SMSG";
+	case GNI_CQ_EVENT_TYPE_MSGQ:
+		return "GNI_CQ_EVENT_TYPE_MSGQ";
+	case GNI_CQ_EVENT_TYPE_DMAPP:
+		return "GNI_CQ_EVENT_TYPE_DMAPP";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+/* ugni_lock is held */
+static union z_ugni_inst_id_u __get_inst_id()
+{
+	int rc;
+	rs_node_t node;
+	union z_ugni_inst_id_u id;
+	rc = rca_get_nodeid(&node);
+	if (rc) {
+		id.u32 = -1;
+	} else {
+		pid_t pid = getpid();
+		id.pid = pid;
+		id.smsg = 0;
+		id.node_id = node.rs_node_s._node_id;
+	}
+	return id;
 }
 
 static void z_ugni_ep_idx_init(struct z_ugni_io_thread *thr)
@@ -992,6 +1027,7 @@ gni_mem_handle_t *map_mh(zap_map_t map)
 /* The caller must hold the endpoint lock */
 static void z_ugni_ep_error(struct z_ugni_ep *uep)
 {
+	assert(0); /* bad */
 	if (uep->sock >= 0)
 		shutdown(uep->sock, SHUT_RDWR);
 	z_ugni_ep_release(uep);
@@ -1040,18 +1076,21 @@ void z_ugni_cleanup(void)
 static void z_ugni_ep_release(struct z_ugni_ep *uep)
 {
 	gni_return_t grc;
-	if (uep->gni_ep) {
-#if 0
-		grc = GNI_EpUnbind(uep->gni_ep);
-		if (grc)
-			LLOG("GNI_EpUnbind() error: %s\n", gni_ret_str(grc));
-#endif
+	if (uep->rdma_ep) {
 		Z_GNI_API_LOCK(uep->ep.thread);
-		grc = GNI_EpDestroy(uep->gni_ep);
+		grc = GNI_EpDestroy(uep->rdma_ep);
 		Z_GNI_API_UNLOCK(uep->ep.thread);
 		if (grc != GNI_RC_SUCCESS)
 			LLOG("GNI_EpDestroy() error: %s\n", gni_ret_str(grc));
-		uep->gni_ep = NULL;
+		uep->rdma_ep = NULL;
+	}
+	if (uep->smsg_ep) {
+		Z_GNI_API_LOCK(uep->ep.thread);
+		grc = GNI_EpDestroy(uep->smsg_ep);
+		Z_GNI_API_UNLOCK(uep->ep.thread);
+		if (grc != GNI_RC_SUCCESS)
+			LLOG("GNI_EpDestroy() error: %s\n", gni_ret_str(grc));
+		uep->smsg_ep = NULL;
 	}
 }
 
@@ -1374,7 +1413,7 @@ static zap_err_t z_ugni_send_connect(struct z_ugni_ep *uep)
 	uint64_t ts_msec;
 
 	msg.hdr.msg_type = htons(ZAP_UGNI_MSG_CONNECT);
-	msg.connect.ep_desc.inst_id = htonl(_dom.inst_id);
+	msg.connect.ep_desc.inst_id = htonl(_dom.inst_id.u32);
 	msg.connect.ep_desc.pe_addr = htonl(_dom.pe_addr);
 	msg.connect.ep_desc.smsg_attr = uep->local_smsg_attr;
 	memcpy(msg.connect.sig, ZAP_UGNI_SIG, sizeof(ZAP_UGNI_SIG));
@@ -1809,7 +1848,7 @@ z_ugni_send_mapped(zap_ep_t ep, zap_map_t map, void *buf, size_t len,
 		return zerr;
 
 	EP_LOCK(uep);
-	if (!uep->gni_ep || ep->state != ZAP_EP_CONNECTED) {
+	if (!uep->smsg_ep || ep->state != ZAP_EP_CONNECTED) {
 		EP_UNLOCK(uep);
 		return ZAP_ERR_NOT_CONNECTED;
 	}
@@ -1831,7 +1870,7 @@ static zap_err_t z_ugni_send(zap_ep_t ep, char *buf, size_t len)
 		return zerr;
 
 	EP_LOCK(uep);
-	if (!uep->gni_ep || ep->state != ZAP_EP_CONNECTED) {
+	if (!uep->smsg_ep || ep->state != ZAP_EP_CONNECTED) {
 		EP_UNLOCK(uep);
 		return ZAP_ERR_NOT_CONNECTED;
 	}
@@ -1977,21 +2016,19 @@ void ugni_node_state_cb(ovis_event_t ev)
 
 void *node_state_proc(void *args)
 {
-	rs_node_t node;
 	int rc;
 	struct ovis_event_s ns_ev;
 
 	/* Initialize the inst_id here. */
 	pthread_mutex_lock(&ugni_lock);
-	rc = rca_get_nodeid(&node);
-	if (rc) {
-		_dom.inst_id = -1;
-	} else {
-		_dom.inst_id = (node.rs_node_s._node_id << 16) | (uint32_t)getpid();
+	_dom.inst_id = __get_inst_id();
+	if (_dom.inst_id.u32 != -1) {
+		_dom.smsg_id = _dom.inst_id;
+		_dom.smsg_id.smsg = 1;
 	}
 	pthread_cond_signal(&inst_id_cond);
 	pthread_mutex_unlock(&ugni_lock);
-	if (rc)
+	if (_dom.inst_id.u32 == -1)
 		return NULL;
 
 	OVIS_EVENT_INIT(&ns_ev);
@@ -2203,7 +2240,7 @@ static int z_ugni_init()
 			fma_mode = GNI_CDM_MODE_FMA_DEDICATED;
 		else
 			fma_mode = GNI_CDM_MODE_FMA_SHARED;
-		grc = GNI_CdmCreate(_dom.inst_id, _dom.ptag, _dom.cookie,
+		grc = GNI_CdmCreate(_dom.inst_id.u32, _dom.ptag, _dom.cookie,
 				    fma_mode, &_dom.cdm);
 		if (grc) {
 			LOG("ERROR: GNI_CdmCreate() failed: %s\n",
@@ -2237,6 +2274,8 @@ int init_once()
 {
 	int rc = ENOMEM;
 
+	bzero(&z_ugni_stat, sizeof(z_ugni_stat));
+
 	ugni_stats = zap_thrstat_new("ugni:cq_proc", ZAP_ENV_INT(ZAP_THRSTAT_WINDOW));
 	rc = ugni_node_state_thread_init();
 	if (rc)
@@ -2249,29 +2288,28 @@ int init_once()
 	 */
 	pthread_mutex_lock(&ugni_lock);
 	if (!_node_state.check_state) {
-		rs_node_t node;
 		/*
 		 * The node_state_thread isn't created, so the nodeid isn't
 		 * initilized. Do it here.
 		 */
-		rc = rca_get_nodeid(&node);
-		if (rc) {
+		_dom.inst_id = __get_inst_id();
+		if (_dom.inst_id.u32 == -1) {
 			pthread_mutex_unlock(&ugni_lock);
 			goto err;
 		}
-
-		_dom.inst_id = (node.rs_node_s._node_id << 16) | (uint32_t)getpid();
+		_dom.smsg_id = _dom.inst_id;
+		_dom.smsg_id.smsg = 1;
 	} else {
 		/*
 		 * The node_state_thread is created and the node id will be
 		 * initialized in there. Wait until it is done.
 		 */
-		while (_dom.inst_id == 0) {
+		while (_dom.inst_id.u32 == 0) {
 			pthread_cond_wait(&inst_id_cond, &ugni_lock);
-			if (_dom.inst_id == 0)
+			if (_dom.inst_id.u32 == 0)
 				continue;
 
-			if (_dom.inst_id == -1) {
+			if (_dom.inst_id.u32 == -1) {
 				/* Error getting the node ID */
 				pthread_mutex_unlock(&ugni_lock);
 				goto err;
@@ -2414,7 +2452,7 @@ zap_err_t z_ugni_accept(zap_ep_t ep, zap_cb_fn_t cb, char *data, size_t data_len
 	EP_UNLOCK(uep);
 
 	msg.hdr.msg_type = htons(ZAP_UGNI_MSG_ACCEPTED);
-	msg.accepted.ep_desc.inst_id = htonl(_dom.inst_id);
+	msg.accepted.ep_desc.inst_id = htonl(_dom.inst_id.u32);
 	msg.accepted.ep_desc.pe_addr = htonl(_dom.pe_addr);
 	msg.accepted.ep_desc.smsg_attr = uep->local_smsg_attr;
 	zerr = z_ugni_smsg_send(uep, &msg, data, data_len, NULL);
@@ -2531,7 +2569,7 @@ static zap_err_t z_ugni_read(zap_ep_t ep, zap_map_t src_map, char *src,
 		return zerr;
 
 	EP_LOCK(ep);
-	if (!uep->gni_ep || ep->state != ZAP_EP_CONNECTED) {
+	if (!uep->rdma_ep || ep->state != ZAP_EP_CONNECTED) {
 		zerr = ZAP_ERR_NOT_CONNECTED;
 		EP_UNLOCK(ep);
 		goto out;
@@ -2554,7 +2592,7 @@ static zap_err_t z_ugni_read(zap_ep_t ep, zap_map_t src_map, char *src,
 	desc->post.remote_mem_hndl = *src_mh;
 	desc->post.length = sz;
 	desc->post.post_id = __sync_fetch_and_add(&ugni_post_id, 1);
-	desc->post.src_cq_hndl = thr->scq;
+	desc->post.src_cq_hndl = thr->rdma_cq;
 
 	desc->context = context;
 #ifdef DEBUG
@@ -2611,7 +2649,7 @@ static zap_err_t z_ugni_write(zap_ep_t ep, zap_map_t src_map, char *src,
 		return zerr;
 
 	EP_LOCK(ep);
-	if (!uep->gni_ep || ep->state != ZAP_EP_CONNECTED) {
+	if (!uep->rdma_ep || ep->state != ZAP_EP_CONNECTED) {
 		zerr = ZAP_ERR_NOT_CONNECTED;
 		EP_UNLOCK(ep);
 		goto out;
@@ -2662,8 +2700,10 @@ void z_ugni_io_thread_cleanup(void *arg)
 		GNI_CompChanDestroy(thr->cch);
 	if (thr->rcq)
 		GNI_CqDestroy(thr->rcq);
-	if (thr->scq)
-		GNI_CqDestroy(thr->scq);
+	if (thr->smsg_cq)
+		GNI_CqDestroy(thr->smsg_cq);
+	if (thr->rdma_cq)
+		GNI_CqDestroy(thr->rdma_cq);
 	if (thr->mbox_mh.qword1 || thr->mbox_mh.qword2)
 		GNI_MemDeregister(_dom.nic, &thr->mbox_mh);
 	if (thr->efd > -1)
@@ -2737,7 +2777,7 @@ static int z_ugni_submit_pending(struct z_ugni_io_thread *thr)
 		}
 		#endif
 		EP_LOG(uep, "resume %s %p\n", op, wr);
-		grc = GNI_PostRdma(uep->gni_ep, &wr->post_desc->post);
+		grc = GNI_PostRdma(uep->rdma_ep, &wr->post_desc->post);
 		Z_GNI_API_UNLOCK(uep->ep.thread);
 		if (grc != GNI_RC_SUCCESS) {
 			EP_LOG(uep, "error %s %p\n", op, wr);
@@ -2746,15 +2786,15 @@ static int z_ugni_submit_pending(struct z_ugni_io_thread *thr)
 			assert(0);
 			goto err;
 		}
-		ATOMIC_INC(&stat.scq_rdma_submitted, 1);
-		ATOMIC_INC(&stat.active_rdma, 1);
+		ATOMIC_INC(&z_ugni_stat.scq_rdma_submitted, 1);
+		ATOMIC_INC(&z_ugni_stat.active_rdma, 1);
 		EP_LOG(uep, "post %s %p\n", op, wr);
 		break;
 	case Z_UGNI_WR_SMSG:
 		uep = thr->ep_idx[wr->send_wr->msg_id>>16].uep;
 		Z_GNI_API_LOCK(uep->ep.thread);
 		EP_LOG(uep, "resume send %p\n", wr);
-		grc = GNI_SmsgSend(uep->gni_ep, wr->send_wr->msg,
+		grc = GNI_SmsgSend(uep->smsg_ep, wr->send_wr->msg,
 				   wr->send_wr->hdr_len,
 				   wr->send_wr->data, wr->send_wr->data_len,
 				   wr->send_wr->msg_id);
@@ -2770,8 +2810,8 @@ static int z_ugni_submit_pending(struct z_ugni_io_thread *thr)
 			rc = EIO;
 			goto err;
 		}
-		ATOMIC_INC(&stat.scq_smsg_submitted, 1);
-		ATOMIC_INC(&stat.active_smsg, 1);
+		ATOMIC_INC(&z_ugni_stat.scq_smsg_submitted, 1);
+		ATOMIC_INC(&z_ugni_stat.active_smsg, 1);
 		EP_LOG(uep, "post send %p\n", wr);
 		CONN_LOG("%p sent pending smsg %s\n", uep, zap_ugni_msg_type_str(ntohs(wr->send_wr->msg->hdr.msg_type)));
 		break;
@@ -2787,26 +2827,6 @@ static int z_ugni_submit_pending(struct z_ugni_io_thread *thr)
 	wr->state = Z_UGNI_WR_SUBMITTED;
 	goto next;
  out:
-	if (TAILQ_EMPTY(&thr->submitted_wrq) && TAILQ_EMPTY(&thr->pending_wrq)
-			&& TAILQ_EMPTY(&thr->out_of_order_wrq)) {
-		LLOG("send queue empty, stat: \n"
-		     "  stat.scq_smsg_submitted: %d\n"
-		     "  stat.scq_smsg_completed: %d\n"
-		     "  stat.scq_rdma_submitted: %d\n"
-		     "  stat.scq_rdma_completed: %d\n"
-		     "  stat.rcq_smsg_success: %d\n"
-		     "  stat.rcq_smsg_not_done: %d\n"
-		     "  stat.rcq_success: %d\n"
-		     "  stat.rcq_rc_not_done: %d\n",
-		     stat.scq_smsg_submitted,
-		     stat.scq_smsg_completed,
-		     stat.scq_rdma_submitted,
-		     stat.scq_rdma_completed,
-		     stat.rcq_smsg_success,
-		     stat.rcq_smsg_not_done,
-		     stat.rcq_success,
-		     stat.rcq_rc_not_done);
-	}
 	return 0;
  err:
 	return rc;
@@ -2823,14 +2843,14 @@ static int z_ugni_handle_scq_rdma(struct z_ugni_io_thread *thr,
 
 	post = NULL;
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	grc = GNI_GetCompleted(thr->scq, cqe, &post);
+	grc = GNI_GetCompleted(thr->rdma_cq, cqe, &post);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (grc != GNI_RC_SUCCESS) {
 		LOG("GNI_GetCompleted() error: %d\n", grc);
 		return -1;
 	}
-	ATOMIC_INC(&stat.scq_rdma_completed, 1);
-	ATOMIC_INC(&stat.active_rdma, -1);
+	ATOMIC_INC(&z_ugni_stat.scq_rdma_completed, 1);
+	ATOMIC_INC(&z_ugni_stat.active_rdma, -1);
 	desc = (void*)post;
 	wr = __container_of(desc, struct z_ugni_wr, post_desc);
 	*_wr = wr;
@@ -2928,18 +2948,18 @@ static int z_ugni_handle_rcq_smsg(struct z_ugni_io_thread *thr, gni_cq_entry_t c
 	__get_ep(&uep->ep, "rcq");
  next:
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	grc = GNI_SmsgGetNext(uep->gni_ep, (void*)&uep->rmsg);
+	grc = GNI_SmsgGetNext(uep->smsg_ep, (void*)&uep->rmsg);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (grc != GNI_RC_SUCCESS) {
 		if (grc != GNI_RC_NOT_DONE) {
 			LLOG("%p GNI_SmsgGetNext() error: %s(%d)\n",
 			     uep, gni_err_str[grc], grc);
 		} else {
-			ATOMIC_INC(&stat.rcq_smsg_not_done, 1);
+			ATOMIC_INC(&z_ugni_stat.rcq_smsg_not_done, 1);
 		}
 		goto out;
 	}
-	ATOMIC_INC(&stat.rcq_smsg_success, 1);
+	ATOMIC_INC(&z_ugni_stat.rcq_smsg_success, 1);
 	msg_type = ntohs(uep->rmsg->hdr.msg_type);
 	CONN_LOG("%p smsg recv: %s (%d)\n", uep, zap_ugni_msg_type_str(msg_type), msg_type);
 	if (ZAP_UGNI_MSG_NONE < msg_type && msg_type < ZAP_UGNI_MSG_TYPE_LAST) {
@@ -2948,7 +2968,7 @@ static int z_ugni_handle_rcq_smsg(struct z_ugni_io_thread *thr, gni_cq_entry_t c
 		process_uep_msg_unknown(uep);
 	}
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	GNI_SmsgRelease(uep->gni_ep);
+	GNI_SmsgRelease(uep->smsg_ep);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	goto next;
  out:
@@ -2972,7 +2992,7 @@ static int z_ugni_handle_scq_smsg(struct z_ugni_io_thread *thr,
 	*_wr = NULL;
 
 	if (!ep_idx || ep_idx >= ZAP_UGNI_THREAD_EP_MAX) {
-		LLOG("scq ep_idx out of range: %hu\n", ep_idx);
+		LLOG("rdma_cq ep_idx out of range: %hu\n", ep_idx);
 		errno = EINVAL;
 		goto err;
 	}
@@ -2988,8 +3008,8 @@ static int z_ugni_handle_scq_smsg(struct z_ugni_io_thread *thr,
 		THR_UNLOCK(thr);
 		goto err;
 	}
-	ATOMIC_INC(&stat.scq_smsg_completed, 1);
-	ATOMIC_INC(&stat.active_smsg, -1);
+	ATOMIC_INC(&z_ugni_stat.scq_smsg_completed, 1);
+	ATOMIC_INC(&z_ugni_stat.active_smsg, -1);
 	grc = GNI_CQ_GET_STATUS(cqe);
 	EP_LOG(uep, "complete send %p (grc: %d)\n", wr, grc);
 	int msg_type = ntohs(wr->send_wr->msg->hdr.msg_type);
@@ -3034,12 +3054,27 @@ static void z_ugni_handle_rcq_events(struct z_ugni_io_thread *thr)
 	gni_return_t grc;
  next:
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	grc = GNI_CqGetEvent(thr->rcq, &cqe);
-	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
+	grc = GNI_CqTestEvent(thr->rcq);
 	if (grc == GNI_RC_NOT_DONE) {
-		ATOMIC_INC(&stat.rcq_rc_not_done, 1);
+		Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 		goto out;
 	}
+	if (grc != GNI_RC_SUCCESS) {
+		Z_GNI_API_UNLOCK(&thr->zap_io_thread);
+		LLOG("Unexpected error from GNI_CqTestEvent(): %s(%d), "
+		     "GNI_CQ_OVERRUN: %d\n",
+		     gni_ret_str(grc), grc, GNI_CQ_OVERRUN(cqe));
+		assert(GNI_CQ_OVERRUN(cqe) == 0); /* rcq OVERRUN */
+		goto out;
+	}
+	grc = GNI_CqGetEvent(thr->rcq, &cqe);
+	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
+#if 0
+	if (grc == GNI_RC_NOT_DONE) {
+		ATOMIC_INC(&z_ugni_stat.rcq_rc_not_done, 1);
+		goto out;
+	}
+#endif
 	if (grc != GNI_RC_SUCCESS) {
 		LLOG("Unexpected error from GNI_CqGetEvent(): %s(%d), "
 		     "GNI_CQ_OVERRUN: %d\n",
@@ -3047,7 +3082,7 @@ static void z_ugni_handle_rcq_events(struct z_ugni_io_thread *thr)
 		assert(GNI_CQ_OVERRUN(cqe) == 0); /* rcq OVERRUN */
 		goto out;
 	}
-	ATOMIC_INC(&stat.rcq_success, 1);
+	ATOMIC_INC(&z_ugni_stat.rcq_success, 1);
 	z_ugni_handle_rcq_smsg(thr, cqe);
 	assert(GNI_CQ_OVERRUN(cqe) == 0); /* rcq OVERRUN */
 	goto next;
@@ -3106,7 +3141,9 @@ static void z_ugni_release_wr(struct z_ugni_wr *wr)
 	uep_submit_pending(uep);
 }
 
-static void z_ugni_handle_scq_events(struct z_ugni_io_thread *thr)
+static void z_ugni_handle_scq_events(struct z_ugni_io_thread *thr,
+				     gni_cq_handle_t cq,
+				     int cqe_type)
 {
 	gni_cq_entry_t cqe;
 	gni_return_t grc;
@@ -3122,7 +3159,7 @@ static void z_ugni_handle_scq_events(struct z_ugni_io_thread *thr)
  next:
 	cqe = 0;
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	grc = GNI_CqGetEvent(thr->scq, &cqe);
+	grc = GNI_CqGetEvent(cq, &cqe);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (grc == GNI_RC_NOT_DONE)
 		goto out;
@@ -3148,9 +3185,11 @@ static void z_ugni_handle_scq_events(struct z_ugni_io_thread *thr)
 	wr = NULL;
 	switch (ev_type) {
 	case GNI_CQ_EVENT_TYPE_POST:
+		assert(ev_type == cqe_type);
 		z_ugni_handle_scq_rdma(thr, cqe, &wr);
 		break;
 	case GNI_CQ_EVENT_TYPE_SMSG:
+		assert(ev_type == cqe_type);
 		z_ugni_handle_scq_smsg(thr, cqe, &wr);
 		break;
 	case GNI_CQ_EVENT_TYPE_MSGQ:
@@ -3170,7 +3209,7 @@ static void z_ugni_handle_scq_events(struct z_ugni_io_thread *thr)
 	TAILQ_REMOVE(&thr->submitted_wrq, wr, entry);
 	if (wr != first) {
 		/* complete out-of-order, put into out_of_order queue */
-		LLOG("out-of-order\n");
+		LLOG("%s out-of-order\n", gni_ev_str(ev_type));
 		TAILQ_INSERT_TAIL(&thr->out_of_order_wrq, wr, entry);
 		THR_UNLOCK(thr);
 		goto next;
@@ -3194,7 +3233,7 @@ static void z_ugni_handle_scq_events(struct z_ugni_io_thread *thr)
 	return ;
 }
 
-static void z_ugni_handle_cq_event(struct z_ugni_io_thread *thr, int events)
+static void z_ugni_handle_cq_event(struct z_ugni_io_thread *thr)
 {
 	gni_return_t grc;
 	gni_cq_handle_t cq;
@@ -3219,8 +3258,10 @@ static void z_ugni_handle_cq_event(struct z_ugni_io_thread *thr, int events)
 
 	if (cq == thr->rcq)
 		z_ugni_handle_rcq_events(thr);
-	else if (cq == thr->scq)
-		z_ugni_handle_scq_events(thr);
+	else if (cq == thr->rdma_cq)
+		z_ugni_handle_scq_events(thr, cq, GNI_CQ_EVENT_TYPE_POST);
+	else if (cq == thr->smsg_cq)
+		z_ugni_handle_scq_events(thr, cq, GNI_CQ_EVENT_TYPE_SMSG);
 }
 
 static void z_ugni_sock_conn_request(struct z_ugni_ep *uep)
@@ -3357,7 +3398,7 @@ static int z_ugni_sock_send_conn_req(struct z_ugni_ep *uep)
 
 	msg.hdr.msg_len = htonl(sizeof(msg));
 	msg.hdr.msg_type = htons(ZAP_UGNI_MSG_CONNECT);
-	msg.ep_desc.inst_id = htonl(_dom.inst_id);
+	msg.ep_desc.inst_id = htonl(_dom.inst_id.u32);
 	msg.ep_desc.pe_addr = htonl(_dom.pe_addr);
 	msg.ep_desc.remote_event = htonl(uep->ep_idx->idx);
 	memcpy(&msg.ep_desc.smsg_attr, &uep->local_smsg_attr, sizeof(msg.ep_desc.smsg_attr));
@@ -3388,7 +3429,7 @@ static int z_ugni_sock_send_conn_accept(struct z_ugni_ep *uep)
 
 	msg.hdr.msg_len = htonl(sizeof(msg));
 	msg.hdr.msg_type = htons(ZAP_UGNI_MSG_ACCEPTED);
-	msg.ep_desc.inst_id = htonl(_dom.inst_id);
+	msg.ep_desc.inst_id = htonl(_dom.inst_id.u32);
 	msg.ep_desc.pe_addr = htonl(_dom.pe_addr);
 	msg.ep_desc.remote_event = htonl(uep->ep_idx->idx);
 	memcpy(&msg.ep_desc.smsg_attr, &uep->local_smsg_attr, sizeof(msg.ep_desc.smsg_attr));
@@ -3407,21 +3448,42 @@ static int z_ugni_sock_send_conn_accept(struct z_ugni_ep *uep)
 
 static int z_ugni_setup_conn(struct z_ugni_ep *uep, struct z_ugni_ep_desc *ep_desc)
 {
+	union z_ugni_inst_id_u inst_id;
 	gni_return_t grc;
 	CONN_LOG("%p setting up GNI connection\n");
-	/* bind remote endpoint */
+	/* bind remote endpoint (RDMA) */
 	Z_GNI_API_LOCK(uep->ep.thread);
-	grc = GNI_EpBind(uep->gni_ep, ep_desc->pe_addr, ep_desc->inst_id);
+	grc = GNI_EpBind(uep->rdma_ep, ep_desc->pe_addr, ep_desc->inst_id);
 	Z_GNI_API_UNLOCK(uep->ep.thread);
 	if (grc != GNI_RC_SUCCESS) {
 		LOG_(uep, "GNI_EpBind() error: %d\n", grc);
 		goto out;
 	}
-	/* set remote event data as remote peer requested */
+	/* bind remote endpoint (SMSG) */
+	inst_id.u32 = ep_desc->inst_id;
+	inst_id.smsg = 1;
+	Z_GNI_API_LOCK(uep->ep.thread);
+	grc = GNI_EpBind(uep->smsg_ep, ep_desc->pe_addr, inst_id.u32);
+	Z_GNI_API_UNLOCK(uep->ep.thread);
+	if (grc != GNI_RC_SUCCESS) {
+		LOG_(uep, "GNI_EpBind() error: %d\n", grc);
+		goto out;
+	}
+	/* set remote event data as remote peer requested (RDMA) */
 	CONN_LOG("%p Setting event data, local: %x, remote: %x\n",
 			uep, uep->ep_idx->idx, ep_desc->remote_event);
 	Z_GNI_API_LOCK(uep->ep.thread);
-	grc = GNI_EpSetEventData(uep->gni_ep, uep->ep_idx->idx, ep_desc->remote_event);
+	grc = GNI_EpSetEventData(uep->rdma_ep, uep->ep_idx->idx, ep_desc->remote_event);
+	Z_GNI_API_UNLOCK(uep->ep.thread);
+	if (grc != GNI_RC_SUCCESS) {
+		LOG_(uep, "GNI_EpSetEventData() error: %d\n", grc);
+		goto out;
+	}
+	/* set remote event data as remote peer requested (SMSG) */
+	CONN_LOG("%p Setting event data, local: %x, remote: %x\n",
+			uep, uep->ep_idx->idx, ep_desc->remote_event);
+	Z_GNI_API_LOCK(uep->ep.thread);
+	grc = GNI_EpSetEventData(uep->smsg_ep, uep->ep_idx->idx, ep_desc->remote_event);
 	Z_GNI_API_UNLOCK(uep->ep.thread);
 	if (grc != GNI_RC_SUCCESS) {
 		LOG_(uep, "GNI_EpSetEventData() error: %d\n", grc);
@@ -3430,7 +3492,7 @@ static int z_ugni_setup_conn(struct z_ugni_ep *uep, struct z_ugni_ep_desc *ep_de
 	/* smsg init */
 	memcpy(&uep->remote_smsg_attr, &ep_desc->smsg_attr, sizeof(ep_desc->smsg_attr));
 	Z_GNI_API_LOCK(uep->ep.thread);
-	grc = GNI_SmsgInit(uep->gni_ep, &uep->local_smsg_attr, &uep->remote_smsg_attr);
+	grc = GNI_SmsgInit(uep->smsg_ep, &uep->local_smsg_attr, &uep->remote_smsg_attr);
 	Z_GNI_API_UNLOCK(uep->ep.thread);
 	if (grc != GNI_RC_SUCCESS) {
 		LOG_(uep, "GNI_SmsgInit() error: %d\n", grc);
@@ -3567,7 +3629,7 @@ static void z_ugni_sock_recv(struct z_ugni_ep *uep)
 static void z_ugni_sock_hup(struct z_ugni_ep *uep)
 {
 	z_ugni_disable_sock(uep);
-	if (uep->ugni_ep_bound) /* if gni_ep is bounded, ignore sock HUP */
+	if (uep->ugni_ep_bound) /* if rdma_ep is bounded, ignore sock HUP */
 		return;
 	switch (uep->ep.state) {
 	case ZAP_EP_CONNECTING:
@@ -3721,7 +3783,7 @@ static int z_ugni_handle_zq_events(struct z_ugni_io_thread *thr, int events)
 	struct z_ugni_ev *uev;
 	struct timespec ts;
 	uint64_t ts_msec;
-	int timeout = -1;
+	int timeout = 500;
 	while (read(thr->zq_fd[0], &c, 1) == 1) {
 		/* clear the notification channel */ ;
 	}
@@ -3775,6 +3837,7 @@ static void *z_ugni_io_thread_proc(void *arg)
 	struct z_ugni_epoll_ctxt *ctxt;
 	struct z_ugni_ep *uep;
 	struct epoll_event ev[N_EV];
+	int was_not_empty;
 
 	pthread_cleanup_push(z_ugni_io_thread_cleanup, thr);
 
@@ -3783,11 +3846,17 @@ static void *z_ugni_io_thread_proc(void *arg)
 	zap_thrstat_wait_start(thr->zap_io_thread.stat);
 	n = epoll_wait(thr->efd, ev, N_EV, timeout);
 	zap_thrstat_wait_end(thr->zap_io_thread.stat);
+	was_not_empty = !TAILQ_EMPTY(&thr->submitted_wrq) ||
+			!TAILQ_EMPTY(&thr->pending_wrq)   ||
+			!TAILQ_EMPTY(&thr->out_of_order_wrq);
+	/* desperately process recv cq and smsg cq everytime we wake up */
+	z_ugni_handle_scq_events(thr, thr->smsg_cq, GNI_CQ_EVENT_TYPE_SMSG);
+	z_ugni_handle_rcq_events(thr);
 	for (i = 0; i < n; i++) {
 		ctxt = ev[i].data.ptr;
 		switch (ctxt->type) {
 		case Z_UGNI_CQ_EVENT:
-			z_ugni_handle_cq_event(thr, ev[i].events);
+			z_ugni_handle_cq_event(thr);
 			break;
 		case Z_UGNI_SOCK_EVENT:
 			uep = container_of(ctxt, struct z_ugni_ep, sock_epoll_ctxt);
@@ -3812,6 +3881,31 @@ static void *z_ugni_io_thread_proc(void *arg)
 	 */
 	THR_LOCK(thr);
 	z_ugni_submit_pending(thr);
+	if (was_not_empty && TAILQ_EMPTY(&thr->submitted_wrq)
+			  && TAILQ_EMPTY(&thr->pending_wrq)
+			  && TAILQ_EMPTY(&thr->out_of_order_wrq)) {
+		LLOG("send queue empty, z_ugni_stat: \n"
+		     "  z_ugni_stat.scq_smsg_submitted: %d\n"
+		     "  z_ugni_stat.scq_smsg_completed: %d\n"
+		     "  z_ugni_stat.scq_rdma_submitted: %d\n"
+		     "  z_ugni_stat.scq_rdma_completed: %d\n"
+		     "  z_ugni_stat.rcq_smsg_success: %d\n"
+		     "  z_ugni_stat.rcq_smsg_not_done: %d\n"
+		     "  z_ugni_stat.rcq_success: %d\n"
+		     "  z_ugni_stat.rcq_rc_not_done: %d\n"
+		     "  z_ugni_stat.active_rdma: %d\n"
+		     "  z_ugni_stat.active_smsg: %d\n",
+		     z_ugni_stat.scq_smsg_submitted,
+		     z_ugni_stat.scq_smsg_completed,
+		     z_ugni_stat.scq_rdma_submitted,
+		     z_ugni_stat.scq_rdma_completed,
+		     z_ugni_stat.rcq_smsg_success,
+		     z_ugni_stat.rcq_smsg_not_done,
+		     z_ugni_stat.rcq_success,
+		     z_ugni_stat.rcq_rc_not_done,
+		     z_ugni_stat.active_rdma,
+		     z_ugni_stat.active_smsg);
+	}
 	THR_UNLOCK(thr);
 
 	goto loop;
@@ -3867,16 +3961,28 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	 * `GNI_CqGetEvent()` is still a non-blocking call.
 	 */
 
-	/* For local/source completions (sends/posts) */
+	/* For RDMA local/source completions (posts) */
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	CONN_LOG("send CqCreate ...\n");
-	rc = GNI_CqCreate(_dom.nic, ZAP_UGNI_SCQ_DEPTH, 0, GNI_CQ_BLOCKING, NULL, NULL, &thr->scq);
-	CONN_LOG("send CqCreate ... done.\n");
+	CONN_LOG("RDMA CqCreate ...\n");
+	rc = GNI_CqCreate(_dom.nic, ZAP_UGNI_SCQ_DEPTH, 0, GNI_CQ_BLOCKING, NULL, NULL, &thr->rdma_cq);
+	CONN_LOG("RDMA CqCreate ... done.\n");
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc != GNI_RC_SUCCESS) {
 		LLOG("GNI_CqCreate() failed: %s(%d)\n", gni_ret_str(rc), rc);
 		goto err_4;
 	}
+
+	/* For SMSG local/source completions (sends) */
+	Z_GNI_API_LOCK(&thr->zap_io_thread);
+	CONN_LOG("SMSG CqCreate ...\n");
+	rc = GNI_CqCreate(_dom.nic, ZAP_UGNI_SCQ_DEPTH, 0, GNI_CQ_BLOCKING, NULL, NULL, &thr->smsg_cq);
+	CONN_LOG("SMSG CqCreate ... done.\n");
+	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
+	if (rc != GNI_RC_SUCCESS) {
+		LLOG("GNI_CqCreate() failed: %s(%d)\n", gni_ret_str(rc), rc);
+		goto err_5;
+	}
+
 	/* For remote/destination completion (recv) */
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	CONN_LOG("recv CqCreate ...\n");
@@ -3885,7 +3991,7 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc != GNI_RC_SUCCESS) {
 		LLOG("GNI_CqCreate() failed: %s(%d)\n", gni_ret_str(rc), rc);
-		goto err_5;
+		goto err_6;
 	}
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	CONN_LOG("Registering mbox ...\n");
@@ -3897,7 +4003,7 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc != GNI_RC_SUCCESS) {
 		LLOG("GNI_MemRegister() failed: %s(%d)\n", gni_ret_str(rc), rc);
-		goto err_6;
+		goto err_7;
 	}
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	CONN_LOG("CompChanCreate ...\n");
@@ -3906,7 +4012,7 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc) {
 		LLOG("GNI_CompChanCreate() failed: %s(%d)\n", gni_ret_str(rc), rc);
-		goto err_7;
+		goto err_8;
 	}
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	CONN_LOG("Get CompChanFd ...\n");
@@ -3915,7 +4021,7 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc) {
 		LLOG("GNI_CompChanFd() failed: %s(%d)\n", gni_ret_str(rc), rc);
-		goto err_8;
+		goto err_9;
 	}
 #if 0
 	rc = __set_nonblock(thr->cch_fd);
@@ -3923,13 +4029,22 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 		goto err_8;
 #endif
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	CONN_LOG("send-CQ CqAttachCompChan ...\n");
-	rc = GNI_CqAttachCompChan(thr->scq, thr->cch);
-	CONN_LOG("send-CQ CqAttachCompChan ... done\n");
+	CONN_LOG("RDMA-CQ CqAttachCompChan ...\n");
+	rc = GNI_CqAttachCompChan(thr->rdma_cq, thr->cch);
+	CONN_LOG("RDMA-CQ CqAttachCompChan ... done\n");
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc) {
 		LLOG("GNI_CqAttachCompChan() failed: %s(%d)\n", gni_ret_str(rc), rc);
-		goto err_8;
+		goto err_9;
+	}
+	Z_GNI_API_LOCK(&thr->zap_io_thread);
+	CONN_LOG("SMSG-CQ CqAttachCompChan ...\n");
+	rc = GNI_CqAttachCompChan(thr->smsg_cq, thr->cch);
+	CONN_LOG("SMSG-CQ CqAttachCompChan ... done\n");
+	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
+	if (rc) {
+		LLOG("GNI_CqAttachCompChan() failed: %s(%d)\n", gni_ret_str(rc), rc);
+		goto err_9;
 	}
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	CONN_LOG("recv-CQ CqAttachCompChan ...\n");
@@ -3938,16 +4053,25 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc) {
 		LLOG("GNI_CqAttachCompChan() failed: %s(%d)\n", gni_ret_str(rc), rc);
-		goto err_8;
+		goto err_9;
 	}
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	CONN_LOG("Arming send-CQ ...\n");
-	rc = GNI_CqArmCompChan(&thr->scq, 1);
-	CONN_LOG("Arming send-CQ ... done\n");
+	CONN_LOG("Arming RDMA-CQ ...\n");
+	rc = GNI_CqArmCompChan(&thr->rdma_cq, 1);
+	CONN_LOG("Arming RDMA-CQ ... done\n");
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc) {
 		LLOG("GNI_CqArmCompChan() failed: %s(%d)\n", gni_ret_str(rc), rc);
-		goto err_8;
+		goto err_9;
+	}
+	Z_GNI_API_LOCK(&thr->zap_io_thread);
+	CONN_LOG("Arming SMSG-CQ ...\n");
+	rc = GNI_CqArmCompChan(&thr->smsg_cq, 1);
+	CONN_LOG("Arming SMSG-CQ ... done\n");
+	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
+	if (rc) {
+		LLOG("GNI_CqArmCompChan() failed: %s(%d)\n", gni_ret_str(rc), rc);
+		goto err_9;
 	}
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	CONN_LOG("Arming recv-CQ ...\n");
@@ -3956,14 +4080,14 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc) {
 		LLOG("GNI_CqArmCompChan() failed: %s(%d)\n", gni_ret_str(rc), rc);
-		goto err_8;
+		goto err_9;
 	}
 	CONN_LOG("Creating zq notification pipe ...\n");
 	rc = pipe2(thr->zq_fd, O_NONBLOCK|O_CLOEXEC);
 	CONN_LOG("Creating zq notification pipe ... done\n");
 	if (rc < 0) {
 		LLOG("pipe2() failed, errno: %d\n", errno);
-		goto err_8;
+		goto err_9;
 	}
 
 	/* cq-epoll */
@@ -3973,7 +4097,7 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	CONN_LOG("Adding CompChanFd to epoll\n");
 	rc = epoll_ctl(thr->efd, EPOLL_CTL_ADD, thr->cch_fd, &ev);
 	if (rc)
-		goto err_9;
+		goto err_10;
 
 	/* zq-epoll */
 	ev.events = EPOLLIN;
@@ -3982,36 +4106,40 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	CONN_LOG("Adding zq fd to epoll\n");
 	rc = epoll_ctl(thr->efd, EPOLL_CTL_ADD, thr->zq_fd[0], &ev);
 	if (rc)
-		goto err_9;
+		goto err_10;
 
 	CONN_LOG("Creating pthread\n");
 	rc = pthread_create(&thr->zap_io_thread.thread, NULL,
 			    z_ugni_io_thread_proc, thr);
 	if (rc)
-		goto err_9;
+		goto err_10;
 	pthread_mutex_unlock(&ugni_lock);
 	pthread_setname_np(thr->zap_io_thread.thread, "zap_ugni_io");
 	CONN_LOG("returning.\n");
 	return &thr->zap_io_thread;
 
- err_9:
+ err_10:
 	close(thr->zq_fd[0]);
 	close(thr->zq_fd[1]);
- err_8:
+ err_9:
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	GNI_CompChanDestroy(thr->cch);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
- err_7:
+ err_8:
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	GNI_MemDeregister(_dom.nic, &thr->mbox_mh);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
- err_6:
+ err_7:
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	GNI_CqDestroy(thr->rcq);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
+ err_6:
+	Z_GNI_API_LOCK(&thr->zap_io_thread);
+	GNI_CqDestroy(thr->smsg_cq);
+	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
  err_5:
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	GNI_CqDestroy(thr->scq);
+	GNI_CqDestroy(thr->rdma_cq);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
  err_4:
 	close(thr->efd);
@@ -4034,7 +4162,7 @@ zap_err_t z_ugni_io_thread_cancel(zap_io_thread_t t)
 	case ESRCH: /* cleaning up structure w/o running thread b/c of fork */
 		thr->cch = 0;
 		thr->rcq = 0;
-		thr->scq = 0;
+		thr->rdma_cq = 0;
 		thr->mbox_mh.qword1 = 0;
 		thr->mbox_mh.qword2 = 0;
 		thr->efd = -1; /* b/c of O_CLOEXEC */
@@ -4084,14 +4212,25 @@ zap_err_t z_ugni_io_thread_ep_assign(zap_io_thread_t t, zap_ep_t ep)
 	 * because we don't know which cq to attached to yet. */
 
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	grc = GNI_EpCreate(_dom.nic, thr->scq, &uep->gni_ep);
+	grc = GNI_EpCreate(_dom.nic, thr->rdma_cq, &uep->rdma_ep);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (grc) {
-		LOG("GNI_EpCreate() failed: %s\n", gni_ret_str(grc));
+		LOG("GNI_EpCreate(rdma_ep) failed: %s\n", gni_ret_str(grc));
 		zerr = ZAP_ERR_RESOURCE;
 		goto out;
 	}
-	CONN_LOG("%p created gni_ep %p\n", uep, uep->gni_ep);
+	Z_GNI_API_LOCK(&thr->zap_io_thread);
+	grc = GNI_EpCreate(_dom.nic, thr->smsg_cq, &uep->smsg_ep);
+	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
+	if (grc) {
+		Z_GNI_API_LOCK(&thr->zap_io_thread);
+		grc = GNI_EpDestroy(uep->rdma_ep);
+		Z_GNI_API_UNLOCK(&thr->zap_io_thread);
+		LOG("GNI_EpCreate(smsg_ep) failed: %s\n", gni_ret_str(grc));
+		zerr = ZAP_ERR_RESOURCE;
+		goto out;
+	}
+	CONN_LOG("%p created rdma_ep %p, smsg_ep %p\n", uep, uep->rdma_ep, uep->smsg_ep);
 	zerr = ZAP_ERR_OK;
  out:
 	THR_UNLOCK(t);

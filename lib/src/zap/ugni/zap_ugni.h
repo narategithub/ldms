@@ -204,6 +204,15 @@ struct zap_ugni_msg_rendezvous {
 	char msg[OVIS_FLEX]; /**< Context */
 };
 
+typedef union z_ugni_inst_id_u {
+	struct {
+		uint32_t node_id : 18;
+		uint32_t smsg    : 1;
+		uint32_t pid     : 13;
+	};
+	uint32_t u32;
+} z_ugni_inst_id_t;
+
 /**
  * Remote endpoint descriptor
  */
@@ -371,8 +380,8 @@ struct z_ugni_ep {
 	uint8_t ugni_term_recv:1; /* TERM msg has been received */
 	uint8_t ugni_ack_term_sent:1; /* ACK_TERM msg has been sent */
 	uint8_t ugni_ack_term_recv:1; /* ACK_TERM msg has been received */
-	gni_ep_handle_t gni_ep;
-	gni_cq_handle_t gni_cq;
+	gni_ep_handle_t rdma_ep; /* for rdma */
+	gni_ep_handle_t smsg_ep; /* for smsg */
 
 	struct z_ugni_ev uev;
 	struct zap_event conn_ev;
@@ -434,18 +443,24 @@ struct z_ugni_ep {
 #define ZAP_UGNI_MSG_SZ_MAX 1024
 
 #define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
-#define ZAP_UGNI_EP_SQ_DEPTH 8
-#define ZAP_UGNI_EP_RQ_DEPTH 8
+#define ZAP_UGNI_EP_SQ_DEPTH 4
+#define ZAP_UGNI_EP_RQ_DEPTH 4
 #define ZAP_UGNI_EP_POST_CREDIT ZAP_UGNI_EP_SQ_DEPTH
 #define ZAP_UGNI_MBOX_MAX_CREDIT (ZAP_UGNI_EP_RQ_DEPTH)
+#if 0
 #define ZAP_UGNI_SCQ_DEPTH ((2*ZAP_UGNI_EP_SQ_DEPTH) * ZAP_UGNI_THREAD_EP_MAX)
 #define ZAP_UGNI_RCQ_DEPTH ((2*ZAP_UGNI_MBOX_MAX_CREDIT) * ZAP_UGNI_THREAD_EP_MAX)
+#else
+#define ZAP_UGNI_SCQ_DEPTH (1024*1024)
+#define ZAP_UGNI_RCQ_DEPTH (1024*1024)
+#endif
 #define ZAP_UGNI_POST_CREDIT ZAP_UGNI_SCQ_DEPTH
 
 struct z_ugni_io_thread {
 	struct zap_io_thread zap_io_thread;
 	int efd; /* epoll file descriptor */
-	gni_cq_handle_t scq; /* Send completion queue: PostRdma, SmsgSend */
+	gni_cq_handle_t smsg_cq; /* Send completion queue for SmsgSend */
+	gni_cq_handle_t rdma_cq; /* Send completion queue for PostRdma */
 	gni_cq_handle_t rcq; /* Recv completion queue: SmsgGetNext (recv) */
 	/* Remark on 2 CQs:
 	 *
