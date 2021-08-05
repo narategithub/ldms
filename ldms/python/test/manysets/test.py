@@ -217,9 +217,12 @@ def client_proc():
             g.cond.wait()
         g.cond.release()
         v = 0
-        for s in g.sets.values():
-            v += verify_set(s)
-        log.info("{}/{} sets verified".format(v, g.num_sets))
+        n_consistent = sum( s.is_consistent for s in g.sets.values() )
+        log.info("{}/{} sets consistent".format(n_consistent, g.num_sets))
+        if False:
+            for s in g.sets.values():
+                v += verify_set(s)
+            log.info("{}/{} sets verified".format(v, g.num_sets))
 
 if g.server:
     server_proc()

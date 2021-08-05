@@ -442,19 +442,35 @@ struct z_ugni_ep {
  * `max_hdr_len`. */
 #define ZAP_UGNI_MSG_SZ_MAX 1024
 
-#define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
-#define ZAP_UGNI_EP_SQ_DEPTH 4
-#define ZAP_UGNI_EP_RQ_DEPTH 4
-#define ZAP_UGNI_EP_POST_CREDIT ZAP_UGNI_EP_SQ_DEPTH
-#define ZAP_UGNI_MBOX_MAX_CREDIT (ZAP_UGNI_EP_RQ_DEPTH)
 #if 0
-#define ZAP_UGNI_SCQ_DEPTH ((2*ZAP_UGNI_EP_SQ_DEPTH) * ZAP_UGNI_THREAD_EP_MAX)
-#define ZAP_UGNI_RCQ_DEPTH ((2*ZAP_UGNI_MBOX_MAX_CREDIT) * ZAP_UGNI_THREAD_EP_MAX)
+#   define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
+#   define ZAP_UGNI_EP_SQ_DEPTH 4
+#   define ZAP_UGNI_EP_RQ_DEPTH 4
+#   define ZAP_UGNI_EP_POST_CREDIT ZAP_UGNI_EP_SQ_DEPTH
+#   define ZAP_UGNI_MBOX_MAX_CREDIT (ZAP_UGNI_EP_RQ_DEPTH)
+#   define ZAP_UGNI_RDMA_CQ_DEPTH ((2*ZAP_UGNI_EP_SQ_DEPTH) * ZAP_UGNI_THREAD_EP_MAX)
+#   define ZAP_UGNI_SMSG_CQ_DEPTH ((2*ZAP_UGNI_EP_SQ_DEPTH) * ZAP_UGNI_THREAD_EP_MAX)
+#   define ZAP_UGNI_RCQ_DEPTH ((2*ZAP_UGNI_MBOX_MAX_CREDIT) * ZAP_UGNI_THREAD_EP_MAX)
+#   define ZAP_UGNI_POST_CREDIT ZAP_UGNI_SCQ_DEPTH
+#elseif 0
+#   define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
+    /* from open-mpi (opal/mca/btl/ugni/btl_ugni_component.c) */
+#   define ZAP_UGNI_EP_POST_CREDIT 2048
+#   define ZAP_UGNI_MBOX_MAX_CREDIT (32)
+#   define ZAP_UGNI_RDMA_CQ_DEPTH (2048)
+#   define ZAP_UGNI_SMSG_CQ_DEPTH (8192)
+#   define ZAP_UGNI_RCQ_DEPTH (40000)
+#   define ZAP_UGNI_POST_CREDIT 2048
 #else
-#define ZAP_UGNI_SCQ_DEPTH (1024*1024)
-#define ZAP_UGNI_RCQ_DEPTH (1024*1024)
+#   define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
+#   define ZAP_UGNI_EP_SQ_DEPTH 64
+#   define ZAP_UGNI_EP_POST_CREDIT ZAP_UGNI_EP_SQ_DEPTH
+#   define ZAP_UGNI_MBOX_MAX_CREDIT 4
+#   define ZAP_UGNI_RDMA_CQ_DEPTH (1024*1024)
+#   define ZAP_UGNI_SMSG_CQ_DEPTH (1024*1024)
+#   define ZAP_UGNI_RCQ_DEPTH (4*1024*1024)
+#   define ZAP_UGNI_POST_CREDIT (ZAP_UGNI_EP_POST_CREDIT * ZAP_UGNI_THREAD_EP_MAX)
 #endif
-#define ZAP_UGNI_POST_CREDIT ZAP_UGNI_SCQ_DEPTH
 
 struct z_ugni_io_thread {
 	struct zap_io_thread zap_io_thread;
@@ -524,9 +540,12 @@ struct z_ugni_io_thread {
 	 * These are protected by zap_io_thread.mutex.
 	 * These tail queues are used to prevent CQ overrun and are used for
 	 * handling out-of-order completions. */
-	struct z_ugni_wrq pending_wrq;
-	struct z_ugni_wrq submitted_wrq;
-	struct z_ugni_wrq out_of_order_wrq;
+	struct z_ugni_wrq pending_smsg_wrq;
+	struct z_ugni_wrq pending_rdma_wrq;
+	struct z_ugni_wrq submitted_smsg_wrq;
+	struct z_ugni_wrq submitted_rdma_wrq;
+	struct z_ugni_wrq ooo_smsg_wrq; /* out_of_order */
+	struct z_ugni_wrq ooo_rdma_wrq; /* out_of_order */
 	int post_credit; /* post credit to prevent cq overrun */
 	uint64_t wr_seq; /* wr sequence number */
 	/* ---------------------------------------- */
