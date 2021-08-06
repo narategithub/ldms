@@ -531,7 +531,6 @@ static struct zap_ugni_dom {
 	uint32_t cookie;
 	uint32_t pe_addr;
 	union z_ugni_inst_id_u inst_id; /* id for RDMA endpoint */
-	union z_ugni_inst_id_u smsg_id; /* id for SMSG endpoint */
 	gni_job_limits_t limits;
 	gni_cdm_handle_t cdm;
 	gni_nic_handle_t nic;
@@ -624,7 +623,6 @@ static union z_ugni_inst_id_u __get_inst_id()
 	} else {
 		pid_t pid = getpid();
 		id.pid = pid;
-		id.smsg = 0;
 		id.node_id = node.rs_node_s._node_id;
 	}
 	return id;
@@ -2016,10 +2014,6 @@ void *node_state_proc(void *args)
 	/* Initialize the inst_id here. */
 	pthread_mutex_lock(&ugni_lock);
 	_dom.inst_id = __get_inst_id();
-	if (_dom.inst_id.u32 != -1) {
-		_dom.smsg_id = _dom.inst_id;
-		_dom.smsg_id.smsg = 1;
-	}
 	pthread_cond_signal(&inst_id_cond);
 	pthread_mutex_unlock(&ugni_lock);
 	if (_dom.inst_id.u32 == -1)
@@ -2291,8 +2285,6 @@ int init_once()
 			pthread_mutex_unlock(&ugni_lock);
 			goto err;
 		}
-		_dom.smsg_id = _dom.inst_id;
-		_dom.smsg_id.smsg = 1;
 	} else {
 		/*
 		 * The node_state_thread is created and the node id will be
@@ -3474,7 +3466,6 @@ static int z_ugni_setup_conn(struct z_ugni_ep *uep, struct z_ugni_ep_desc *ep_de
 	}
 	/* bind remote endpoint (SMSG) */
 	inst_id.u32 = ep_desc->inst_id;
-	inst_id.smsg = 1;
 	Z_GNI_API_LOCK(uep->ep.thread);
 	grc = GNI_EpBind(uep->smsg_ep, ep_desc->pe_addr, inst_id.u32);
 	Z_GNI_API_UNLOCK(uep->ep.thread);

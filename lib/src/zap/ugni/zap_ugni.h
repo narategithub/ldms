@@ -207,8 +207,7 @@ struct zap_ugni_msg_rendezvous {
 typedef union z_ugni_inst_id_u {
 	struct {
 		uint32_t node_id : 18;
-		uint32_t smsg    : 1;
-		uint32_t pid     : 13;
+		uint32_t pid     : 14;
 	};
 	uint32_t u32;
 } z_ugni_inst_id_t;
