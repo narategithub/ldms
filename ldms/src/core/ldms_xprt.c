@@ -296,6 +296,8 @@ void __ldms_free_ctxt(struct ldms_xprt *x, struct ldms_context *ctxt)
 	struct timespec end;
 	ldms_stats_entry_t e = NULL;
 
+	assert(ctxt->freed == 0);
+
 	(void)clock_gettime(CLOCK_REALTIME, &end);
 	dur_us = ldms_timespec_diff_us(&ctxt->start, &end);
 
@@ -341,9 +343,7 @@ void __ldms_free_ctxt(struct ldms_xprt *x, struct ldms_context *ctxt)
 		e->mean_us /= e->count;
 	}
 	ldms_xprt_put(ctxt->x);
-	/* XXX DEBUG, UNDO ME */
-	/* free(ctxt); */
-	ctxt->freed = 1;
+	free(ctxt);
 }
 
 static void send_dir_update(struct ldms_xprt *x,
