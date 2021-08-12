@@ -1,8 +1,8 @@
 /**
- * Copyright (c) 2014-2017,2019-2020 National Technology & Engineering Solutions
+ * Copyright (c) 2014-2017,2019-2021 National Technology & Engineering Solutions
  * of Sandia, LLC (NTESS). Under the terms of Contract DE-NA0003525 with
  * NTESS, the U.S. Government retains certain rights in this software.
- * Copyright (c) 2014-2017,2019-2020 Open Grid Computing, Inc. All rights reserved.
+ * Copyright (c) 2014-2017,2019-2021 Open Grid Computing, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -69,6 +69,22 @@
  * lcl=<local ip address:port> <--> rmt=<remote ip address:port>
  */
 #define ZAP_UGNI_EP_NAME_SZ 64
+
+/* NOTE: This is the maximum entire message length submitted to GNI_SmsgSend().
+ * The `max_msg` length reported to the application is ZAP_UGNI_MSG_MAX -
+ * `max_hdr_len`. */
+#define ZAP_UGNI_MSG_SZ_MAX 1024
+
+#if 1
+#   define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
+#   define ZAP_UGNI_EP_SQ_DEPTH 64
+#   define ZAP_UGNI_EP_POST_CREDIT ZAP_UGNI_EP_SQ_DEPTH
+#   define ZAP_UGNI_EP_MSG_CREDIT 4
+#   define ZAP_UGNI_RDMA_CQ_DEPTH (1024*1024)
+#   define ZAP_UGNI_SMSG_CQ_DEPTH (1024*1024)
+#   define ZAP_UGNI_RCQ_DEPTH (4*1024*1024)
+#   define ZAP_UGNI_POST_CREDIT (ZAP_UGNI_EP_POST_CREDIT * ZAP_UGNI_THREAD_EP_MAX)
+#endif
 
 /* This is used by handle rendezvous */
 struct zap_ugni_map {
@@ -176,10 +192,20 @@ struct ugni_mh {
  * \brief Zap message header for socket transport.
  *
  * Each of the sock_msg's is an extension to ::zap_ugni_msg_hdr.
+ *
+ * REMARK on `processed`.
+ * - In `sbuf`, processed==1 means available to use for send, and if
+ *   processed==0, the peer has not finished processing the previous message
+ *   sent from that sbuf yet.
+ * - In `rbuf`, processed==0 means that the message in the rbuf is available to
+ *   be processed has not been processed yet. processed==1 means that the
+ *   message has already been processed or it is not available.
+ *
  */
 struct zap_ugni_msg_hdr {
 	uint16_t msg_type;
-	uint16_t reserved;
+	uint16_t processed:1;
+	uint16_t reserved:15;
 	uint32_t msg_len; /** Length of the entire message, header included. */
 };
 
@@ -219,7 +245,9 @@ struct z_ugni_ep_desc {
 	uint32_t inst_id; /**< peer inst_id */
 	uint32_t pe_addr; /**< peer address */
 	uint32_t remote_event; /**< `remote_event` for `GNI_EpSetEventData()` */
-	struct gni_smsg_attr smsg_attr; /**< recv buffer info */
+	uint32_t mbuf_sz; /**< size of mbuf structure (for verification) */
+	uint64_t mbuf_addr; /**< pointer to message buffer structure */
+	gni_mem_handle_t mbuf_mh; /**< memory handle for message buffer */
 };
 
 static char ZAP_UGNI_SIG[8] = "UGNI_2";
@@ -294,7 +322,9 @@ struct z_ugni_sock_msg_conn_accept {
 #define UGNI_WR_F_SEND_MAPPED 0x4
 
 struct zap_ugni_send_wr {
+	gni_post_descriptor_t post;
 	TAILQ_ENTRY(zap_ugni_send_wr) link;
+	struct z_ugni_msg_buf_ent *sbuf;
 	void  *ctxt; /* for send_mapped completion */
 	int    flags; /* various wr flags */
 	uint32_t msg_id; /* ep_idx(16-bit)|smsg_seq(16-bit) */
@@ -335,7 +365,9 @@ struct z_ugni_wr {
 	struct z_ugni_ep *uep;
 	enum {
 		Z_UGNI_WR_RDMA,
-		Z_UGNI_WR_SMSG,
+		Z_UGNI_WR_SEND,
+		Z_UGNI_WR_SEND_MAPPED,
+		Z_UGNI_WR_RECV_ACK,
 	} type;
 	enum {
 		Z_UGNI_WR_INIT,
@@ -360,10 +392,14 @@ struct z_ugni_ev {
 	struct zap_event zev;
 };
 
+struct z_ugni_msg_buf;
 struct zap_ugni_post_desc;
 LIST_HEAD(zap_ugni_post_desc_list, zap_ugni_post_desc);
+
 struct z_ugni_ep {
 	struct zap_ep ep;
+
+	struct z_ugni_ep_desc peer_ep_desc; /* keep for a reference */
 
 	int sock;
 	int node_id;
@@ -380,7 +416,6 @@ struct z_ugni_ep {
 	uint8_t ugni_ack_term_sent:1; /* ACK_TERM msg has been sent */
 	uint8_t ugni_ack_term_recv:1; /* ACK_TERM msg has been received */
 	gni_ep_handle_t rdma_ep; /* for rdma */
-	gni_ep_handle_t smsg_ep; /* for smsg */
 
 	struct z_ugni_ev uev;
 	struct zap_event conn_ev;
@@ -406,9 +441,6 @@ struct z_ugni_ep {
 	uint64_t next_msg_id;
 	uint16_t next_msg_seq;
 
-	gni_smsg_attr_t local_smsg_attr;
-	gni_smsg_attr_t remote_smsg_attr;
-
 	struct z_ugni_epoll_ctxt sock_epoll_ctxt;
 	union {
 		char buff[0];
@@ -425,56 +457,36 @@ struct z_ugni_ep {
 #ifdef EP_LOG_ENABLED
 	FILE *log;
 #endif
-	/*
-	 * These are for controlling on-the-wire outstanding requests per
-	 * endpoint. The main objective is to control smsg send.
-	 *
-	 * NOTE: The pending list and the credit is protected by the THR_LOCK,
-	 *       not the EP_LOCK.
-	 */
+	/* for pending requests */
 	struct z_ugni_wrq pending_wrq;
-	int post_credit; /* post credit */
+
+	/* work request corresponding to send in mbuf */
+	struct z_ugni_wr *wr[ZAP_UGNI_EP_MSG_CREDIT];
+
+	struct z_ugni_msg_buf *mbuf;
 };
 
-/* NOTE: This is the maximum entire message length submitted to GNI_SmsgSend().
- * The `max_msg` length reported to the application is ZAP_UGNI_MSG_MAX -
- * `max_hdr_len`. */
-#define ZAP_UGNI_MSG_SZ_MAX 1024
+struct z_ugni_msg_buf_ent {
+	union {
+		struct zap_ugni_msg msg;
+		char bytes[ZAP_UGNI_MSG_SZ_MAX];
+	};
+};
 
-#if 0
-#   define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
-#   define ZAP_UGNI_EP_SQ_DEPTH 4
-#   define ZAP_UGNI_EP_RQ_DEPTH 4
-#   define ZAP_UGNI_EP_POST_CREDIT ZAP_UGNI_EP_SQ_DEPTH
-#   define ZAP_UGNI_MBOX_MAX_CREDIT (ZAP_UGNI_EP_RQ_DEPTH)
-#   define ZAP_UGNI_RDMA_CQ_DEPTH ((2*ZAP_UGNI_EP_SQ_DEPTH) * ZAP_UGNI_THREAD_EP_MAX)
-#   define ZAP_UGNI_SMSG_CQ_DEPTH ((2*ZAP_UGNI_EP_SQ_DEPTH) * ZAP_UGNI_THREAD_EP_MAX)
-#   define ZAP_UGNI_RCQ_DEPTH ((2*ZAP_UGNI_MBOX_MAX_CREDIT) * ZAP_UGNI_THREAD_EP_MAX)
-#   define ZAP_UGNI_POST_CREDIT ZAP_UGNI_SCQ_DEPTH
-#elseif 0
-#   define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
-    /* from open-mpi (opal/mca/btl/ugni/btl_ugni_component.c) */
-#   define ZAP_UGNI_EP_POST_CREDIT 2048
-#   define ZAP_UGNI_MBOX_MAX_CREDIT (32)
-#   define ZAP_UGNI_RDMA_CQ_DEPTH (2048)
-#   define ZAP_UGNI_SMSG_CQ_DEPTH (8192)
-#   define ZAP_UGNI_RCQ_DEPTH (40000)
-#   define ZAP_UGNI_POST_CREDIT 2048
-#else
-#   define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
-#   define ZAP_UGNI_EP_SQ_DEPTH 64
-#   define ZAP_UGNI_EP_POST_CREDIT ZAP_UGNI_EP_SQ_DEPTH
-#   define ZAP_UGNI_MBOX_MAX_CREDIT 4
-#   define ZAP_UGNI_RDMA_CQ_DEPTH (1024*1024)
-#   define ZAP_UGNI_SMSG_CQ_DEPTH (1024*1024)
-#   define ZAP_UGNI_RCQ_DEPTH (4*1024*1024)
-#   define ZAP_UGNI_POST_CREDIT (ZAP_UGNI_EP_POST_CREDIT * ZAP_UGNI_THREAD_EP_MAX)
-#endif
+/** recv buffer for an endpoint */
+struct z_ugni_msg_buf {
+	int curr_rbuf_idx; /* current recv buffer index */
+	int curr_sbuf_idx; /* current send buffer index */
+	/* Peer will write messages to rbuf using RDMA PUT */
+	struct z_ugni_msg_buf_ent rbuf[ZAP_UGNI_EP_MSG_CREDIT];
+	/* Our sbuf will be copied to peer's rbuf using RDMA PUT. sbuf[i] will
+	 * be copied to the peer's rbuf[i]. */
+	struct z_ugni_msg_buf_ent sbuf[ZAP_UGNI_EP_MSG_CREDIT];
+};
 
 struct z_ugni_io_thread {
 	struct zap_io_thread zap_io_thread;
 	int efd; /* epoll file descriptor */
-	gni_cq_handle_t smsg_cq; /* Send completion queue for SmsgSend */
 	gni_cq_handle_t rdma_cq; /* Send completion queue for PostRdma */
 	gni_cq_handle_t rcq; /* Recv completion queue: SmsgGetNext (recv) */
 	/* Remark on 2 CQs:
@@ -522,11 +534,6 @@ struct z_ugni_io_thread {
 	struct z_ugni_ep_idx ep_idx[ZAP_UGNI_THREAD_EP_MAX];
 	struct z_ugni_ep_idx *ep_idx_head, *ep_idx_tail;
 
-	/* mailboxes for endpoints in this thread */
-	uint32_t mbox_sz; /* size per mbox */
-	gni_mem_handle_t mbox_mh; /* memory handle for mbox */
-	char *mbox; /* mailboxes memory */
-
 	struct z_ugni_wrq stalled_wrq;
 
 	struct rbt zq; /* zap event queue, protected by zap_io_thread.mutex */
@@ -549,6 +556,8 @@ struct z_ugni_io_thread {
 	uint64_t wr_seq; /* wr sequence number */
 	/* ---------------------------------------- */
 
+	struct z_ugni_msg_buf *mbuf;
+	gni_mem_handle_t mbuf_mh; /* memory handle for msg buffer */
 };
 
 #endif
