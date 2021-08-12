@@ -77,13 +77,11 @@
 
 #if 1
 #   define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
-#   define ZAP_UGNI_EP_SQ_DEPTH 64
-#   define ZAP_UGNI_EP_POST_CREDIT ZAP_UGNI_EP_SQ_DEPTH
-#   define ZAP_UGNI_EP_MSG_CREDIT 4
+#   define ZAP_UGNI_EP_MSG_CREDIT 1
 #   define ZAP_UGNI_RDMA_CQ_DEPTH (1024*1024)
 #   define ZAP_UGNI_SMSG_CQ_DEPTH (1024*1024)
 #   define ZAP_UGNI_RCQ_DEPTH (4*1024*1024)
-#   define ZAP_UGNI_POST_CREDIT (ZAP_UGNI_EP_POST_CREDIT * ZAP_UGNI_THREAD_EP_MAX)
+#   define ZAP_UGNI_POST_CREDIT (128)
 #endif
 
 /* This is used by handle rendezvous */
@@ -119,6 +117,7 @@ typedef enum zap_ugni_msg_type {
 	ZAP_UGNI_MSG_TERM,        /**< Connection termination request */
 	ZAP_UGNI_MSG_ACK_TERM,    /**< Acknowledge connection termination */
 	ZAP_UGNI_MSG_SEND_MAPPED, /**< Application send-receive (w/mapped) */
+	ZAP_UGNI_MSG_RECV_ACK,    /**< Recv acknowledgement */
 	ZAP_UGNI_MSG_TYPE_LAST    /**< Dummy last type (for type count) */
 } zap_ugni_msg_type_t;
 
@@ -219,6 +218,13 @@ struct zap_ugni_msg_regular {
 };
 
 /**
+ * Recv acknowledgement.
+ */
+struct zap_ugni_msg_recv_ack {
+	struct zap_ugni_msg_hdr hdr;
+};
+
+/**
  * Message for exporting/sharing zap_map.
  */
 struct zap_ugni_msg_rendezvous {
@@ -286,6 +292,7 @@ struct zap_ugni_msg_accepted {
 typedef struct zap_ugni_msg {
 	union {
 		struct zap_ugni_msg_hdr hdr;
+		struct zap_ugni_msg_recv_ack recv_ack;
 		struct zap_ugni_msg_regular regular;
 		struct zap_ugni_msg_connect connect;
 		struct zap_ugni_msg_accepted accepted;
@@ -349,7 +356,6 @@ struct z_ugni_ep_idx {
 
 struct zap_ugni_post_desc {
 	gni_post_descriptor_t post;
-	struct z_ugni_ep *uep;
 	uint32_t ep_gn;
 	char ep_name[ZAP_UGNI_EP_NAME_SZ];
 	uint8_t is_stalled; /* It is in the stalled list. */
@@ -376,6 +382,7 @@ struct z_ugni_wr {
 		Z_UGNI_WR_STALLED, /* submitted, but not completed before ep destroy */
 	} state;
 	union {
+		gni_post_descriptor_t post[0];
 		struct zap_ugni_post_desc post_desc[0];
 		struct zap_ugni_send_wr send_wr[0];
 	};
@@ -460,9 +467,6 @@ struct z_ugni_ep {
 	/* for pending requests */
 	struct z_ugni_wrq pending_wrq;
 
-	/* work request corresponding to send in mbuf */
-	struct z_ugni_wr *wr[ZAP_UGNI_EP_MSG_CREDIT];
-
 	struct z_ugni_msg_buf *mbuf;
 };
 
@@ -546,11 +550,8 @@ struct z_ugni_io_thread {
 	 * These are protected by zap_io_thread.mutex.
 	 * These tail queues are used to prevent CQ overrun and are used for
 	 * handling out-of-order completions. */
-	struct z_ugni_wrq pending_smsg_wrq;
 	struct z_ugni_wrq pending_rdma_wrq;
-	struct z_ugni_wrq submitted_smsg_wrq;
 	struct z_ugni_wrq submitted_rdma_wrq;
-	struct z_ugni_wrq ooo_smsg_wrq; /* out_of_order */
 	struct z_ugni_wrq ooo_rdma_wrq; /* out_of_order */
 	int post_credit; /* post credit to prevent cq overrun */
 	uint64_t wr_seq; /* wr sequence number */
