@@ -438,15 +438,14 @@ zap_mem_info_fn_t __mem_info_fn = NULL;
 #define ATOMIC_INC(PTR, V) __atomic_add_fetch(PTR, V, __ATOMIC_SEQ_CST)
 
 static struct z_ugni_debug_stat {
-	int smsg_send_submitted;
-	int smsg_send_completed;
+	int send_submitted;
+	int send_completed;
 	int rdma_submitted;
 	int rdma_completed;
-	int smsg_recv_success;
-	int smsg_rc_not_done;
+	int recv_success;
 	int rcq_success;
 	int rcq_rc_not_done;
-	int active_smsg;
+	int active_send;
 	int active_rdma;
 } z_ugni_stat = {0};
 
@@ -2784,8 +2783,8 @@ static int z_ugni_submit_pending_rdma(struct z_ugni_io_thread *thr)
 		ATOMIC_INC(&z_ugni_stat.rdma_submitted, 1);
 		ATOMIC_INC(&z_ugni_stat.active_rdma, 1);
 	} else {
-		ATOMIC_INC(&z_ugni_stat.smsg_send_submitted, 1);
-		ATOMIC_INC(&z_ugni_stat.active_smsg, 1);
+		ATOMIC_INC(&z_ugni_stat.send_submitted, 1);
+		ATOMIC_INC(&z_ugni_stat.active_send, 1);
 	}
 	EP_LOG(uep, "post %s %p\n", op, wr);
 	assert(wr->state == Z_UGNI_WR_PENDING);
@@ -2803,8 +2802,8 @@ static int __on_wr_send_comp(struct z_ugni_io_thread *thr,struct z_ugni_wr *wr, 
 {
 	struct z_ugni_ep *uep = wr->uep;
 	struct zap_event zev = {0};
-	ATOMIC_INC(&z_ugni_stat.smsg_send_completed, 1);
-	ATOMIC_INC(&z_ugni_stat.active_smsg, -1);
+	ATOMIC_INC(&z_ugni_stat.send_completed, 1);
+	ATOMIC_INC(&z_ugni_stat.active_send, -1);
 	if (grc != GNI_RC_SUCCESS)
 		zev.status = ZAP_ERR_RESOURCE;
 	switch (wr->type) {
@@ -2937,7 +2936,7 @@ static int z_ugni_handle_rcq_smsg(struct z_ugni_io_thread *thr, gni_cq_entry_t c
 		goto out;
 	}
 	uep->rmsg = &ent->msg;
-	ATOMIC_INC(&z_ugni_stat.smsg_recv_success, 1);
+	ATOMIC_INC(&z_ugni_stat.recv_success, 1);
 	msg_type = ntohs(uep->rmsg->hdr.msg_type);
 	CONN_LOG("%p smsg recv: %s (%d)\n", uep, zap_ugni_msg_type_str(msg_type), msg_type);
 	if (ZAP_UGNI_MSG_NONE < msg_type && msg_type < ZAP_UGNI_MSG_TYPE_LAST) {
@@ -3821,26 +3820,24 @@ static void *z_ugni_io_thread_proc(void *arg)
 			  && TAILQ_EMPTY(&thr->pending_rdma_wrq)
 			  && TAILQ_EMPTY(&thr->ooo_rdma_wrq)) {
 		LLOG("send queue empty, z_ugni_stat: \n"
-		     "  z_ugni_stat.smsg_send_submitted: %d\n"
-		     "  z_ugni_stat.smsg_send_completed: %d\n"
+		     "  z_ugni_stat.send_submitted: %d\n"
+		     "  z_ugni_stat.send_completed: %d\n"
 		     "  z_ugni_stat.rdma_submitted: %d\n"
 		     "  z_ugni_stat.rdma_completed: %d\n"
-		     "  z_ugni_stat.smsg_recv_success: %d\n"
-		     "  z_ugni_stat.smsg_rc_not_done: %d\n"
+		     "  z_ugni_stat.recv_success: %d\n"
 		     "  z_ugni_stat.rcq_success: %d\n"
 		     "  z_ugni_stat.rcq_rc_not_done: %d\n"
 		     "  z_ugni_stat.active_rdma: %d\n"
-		     "  z_ugni_stat.active_smsg: %d\n",
-		     z_ugni_stat.smsg_send_submitted,
-		     z_ugni_stat.smsg_send_completed,
+		     "  z_ugni_stat.active_send: %d\n",
+		     z_ugni_stat.send_submitted,
+		     z_ugni_stat.send_completed,
 		     z_ugni_stat.rdma_submitted,
 		     z_ugni_stat.rdma_completed,
-		     z_ugni_stat.smsg_recv_success,
-		     z_ugni_stat.smsg_rc_not_done,
+		     z_ugni_stat.recv_success,
 		     z_ugni_stat.rcq_success,
 		     z_ugni_stat.rcq_rc_not_done,
 		     z_ugni_stat.active_rdma,
-		     z_ugni_stat.active_smsg);
+		     z_ugni_stat.active_send);
 	}
 	THR_UNLOCK(thr);
 
