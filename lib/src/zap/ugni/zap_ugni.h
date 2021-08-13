@@ -73,11 +73,11 @@
 /* NOTE: This is the maximum entire message length submitted to GNI_SmsgSend().
  * The `max_msg` length reported to the application is ZAP_UGNI_MSG_MAX -
  * `max_hdr_len`. */
-#define ZAP_UGNI_MSG_SZ_MAX 1024
+#define ZAP_UGNI_BUFSZ 1024
 
 #if 1
 #   define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
-#   define ZAP_UGNI_EP_MSG_CREDIT 1
+#   define ZAP_UGNI_EP_MSG_CREDIT 4
 #   define ZAP_UGNI_RDMA_CQ_DEPTH (1024*1024)
 #   define ZAP_UGNI_SMSG_CQ_DEPTH (1024*1024)
 #   define ZAP_UGNI_RCQ_DEPTH (4*1024*1024)
@@ -203,8 +203,7 @@ struct ugni_mh {
  */
 struct zap_ugni_msg_hdr {
 	uint16_t msg_type;
-	uint16_t processed:1;
-	uint16_t reserved:15;
+	uint16_t reserved;
 	uint32_t msg_len; /** Length of the entire message, header included. */
 };
 
@@ -473,8 +472,12 @@ struct z_ugni_ep {
 struct z_ugni_msg_buf_ent {
 	union {
 		struct zap_ugni_msg msg;
-		char bytes[ZAP_UGNI_MSG_SZ_MAX];
+		char bytes[ZAP_UGNI_BUFSZ - 8];
 	};
+	struct {
+		uint8_t  processed:1;
+		uint64_t reserved:63;
+	} status;
 };
 
 /** recv buffer for an endpoint */

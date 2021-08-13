@@ -848,18 +848,18 @@ static struct z_ugni_wr *z_ugni_alloc_ack_wr(struct z_ugni_ep *uep, int idx)
 	msg_seq = __atomic_fetch_add(&uep->next_msg_seq, 1, __ATOMIC_SEQ_CST);
 	wr->send_wr->msg_id = (uep->ep_idx->idx << 16)|(msg_seq);
 
-	/* our rbuf[idx] writes to peer's sbuf[idx] */
+	/* our rbuf[idx].status writes to peer's sbuf[idx].status */
 	ent = &uep->mbuf->rbuf[idx];
-	peer_off = uep->mbuf->sbuf[idx].bytes - (char*)uep->mbuf;
+	peer_off = (char*)&uep->mbuf->sbuf[idx].status - (char*)uep->mbuf;
 
 	wr->send_wr->post.type = GNI_POST_RDMA_PUT;
 	wr->send_wr->post.cq_mode = GNI_CQMODE_GLOBAL_EVENT | GNI_CQMODE_REMOTE_EVENT;
 	wr->send_wr->post.dlvr_mode = GNI_DLVMODE_IN_ORDER;
-	wr->send_wr->post.local_addr = (uint64_t)ent->bytes;
+	wr->send_wr->post.local_addr = (uint64_t)&ent->status;
 	wr->send_wr->post.local_mem_hndl = thr->mbuf_mh;
 	wr->send_wr->post.remote_addr = uep->peer_ep_desc.mbuf_addr + peer_off;
 	wr->send_wr->post.remote_mem_hndl = uep->peer_ep_desc.mbuf_mh;
-	wr->send_wr->post.length = ROUNDUP(sizeof(struct zap_ugni_msg_recv_ack), 64);
+	wr->send_wr->post.length = sizeof(ent->status);
 
 	return wr;
 }
@@ -1337,8 +1337,7 @@ static int z_ugni_get_sbuff(struct z_ugni_ep *uep, struct z_ugni_wr *wr)
 	struct z_ugni_io_thread *thr = (void*)uep->ep.thread;
 	struct z_ugni_msg_buf_ent *sbuf = &mbuf->sbuf[idx];
 	off_t rbuf_off;
-	size_t sz;
-	if (0 == sbuf->msg.hdr.processed) {
+	if (0 == sbuf->status.processed) {
 		/* Not available. The peer has not done processing the message
 		 * yet. */
 		return 0;
@@ -1348,7 +1347,7 @@ static int z_ugni_get_sbuff(struct z_ugni_ep *uep, struct z_ugni_wr *wr)
 	memcpy(sbuf->bytes, wr->send_wr->msg, wr->send_wr->hdr_len);
 	if (wr->send_wr->data_len)
 		memcpy(sbuf->bytes + wr->send_wr->hdr_len, wr->send_wr->data, wr->send_wr->data_len);
-	sbuf->msg.hdr.processed = 0;
+	sbuf->status.processed = 0;
 	wr->send_wr->sbuf = sbuf;
 
 	/* prep post descriptor */
@@ -1360,8 +1359,7 @@ static int z_ugni_get_sbuff(struct z_ugni_ep *uep, struct z_ugni_wr *wr)
 	rbuf_off = mbuf->rbuf[idx].bytes - (char*)mbuf;
 	wr->send_wr->post.remote_addr = uep->peer_ep_desc.mbuf_addr + rbuf_off;
 	wr->send_wr->post.remote_mem_hndl = uep->peer_ep_desc.mbuf_mh;
-	sz = wr->send_wr->hdr_len + wr->send_wr->data_len;
-	wr->send_wr->post.length = ROUNDUP(sz, 64);
+	wr->send_wr->post.length = sizeof(*sbuf);
 
 	mbuf->curr_sbuf_idx = (mbuf->curr_sbuf_idx+1) % ZAP_UGNI_EP_MSG_CREDIT;
 	return 1;
@@ -2934,7 +2932,7 @@ static int z_ugni_handle_rcq_smsg(struct z_ugni_io_thread *thr, gni_cq_entry_t c
 	/* we're the only thread accessing / modifying rbuf and curr_rbuf_idx,
 	 * so no lock is required */
 	ent = &uep->mbuf->rbuf[uep->mbuf->curr_rbuf_idx];
-	if (ent->msg.hdr.processed) {
+	if (ent->status.processed) {
 		/* no more immediate message */
 		goto out;
 	}
@@ -2947,7 +2945,7 @@ static int z_ugni_handle_rcq_smsg(struct z_ugni_io_thread *thr, gni_cq_entry_t c
 	} else {
 		process_uep_msg_unknown(uep);
 	}
-	uep->rmsg->hdr.processed = 1;
+	ent->status.processed = 1;
 	/* ack the message. ack does not need credit */
 	wr = z_ugni_alloc_ack_wr(uep, uep->mbuf->curr_rbuf_idx);
 	Z_GNI_API_LOCK(uep->ep.thread);
@@ -3438,8 +3436,8 @@ static int z_ugni_setup_conn(struct z_ugni_ep *uep, struct z_ugni_ep_desc *ep_de
 	/* initialize msg buf */
 	bzero(mbuf, sizeof(*mbuf));
 	for (i = 0; i < ZAP_UGNI_EP_MSG_CREDIT; i++) {
-		mbuf->rbuf[i].msg.hdr.processed = 1;
-		mbuf->sbuf[i].msg.hdr.processed = 1;
+		mbuf->rbuf[i].status.processed = 1;
+		mbuf->sbuf[i].status.processed = 1;
 	}
  out:
 	return gni_rc_to_errno(grc);
@@ -4131,6 +4129,7 @@ zap_err_t zap_transport_get(zap_t *pz, zap_log_fn_t log_fn,
 			    zap_mem_info_fn_t mem_info_fn)
 {
 	zap_t z;
+	struct z_ugni_msg_buf_ent buf; /* for size calculation */
 	if (log_fn)
 		zap_ugni_log = log_fn;
 	if (!init_complete && init_once())
@@ -4141,7 +4140,10 @@ zap_err_t zap_transport_get(zap_t *pz, zap_log_fn_t log_fn,
 		goto err;
 
 	__mem_info_fn = mem_info_fn;
-	z->max_msg = ZAP_UGNI_MSG_SZ_MAX - sizeof(struct zap_ugni_msg);
+	/* max_msg is the application message size (which is the data of zap
+	 * message). */
+	z->max_msg = sizeof(buf.bytes) - sizeof(buf.msg);
+	/* 8 bytes is the size of the buffer status at the end of the buffer */
 	z->new = z_ugni_new;
 	z->destroy = z_ugni_destroy;
 	z->connect = z_ugni_connect;
