@@ -86,12 +86,14 @@ class PrdcrSet(object):
         self.state = PrdcrSet.LOOKUP
 
     def update_cb(self, lset, flags, args):
+        log.info("{} update completed".format(self.lset.name))
         self.state = self.READY
         pass
 
     def update(self):
         assert(self.state != self.UPDATE)
         self.state = self.UPDATE
+        log.info("updating {}".format(self.lset.name))
         self.lset.update(self.update_cb, None)
 
 def sample(s):
@@ -149,6 +151,7 @@ def server_proc():
             sample(s)
 
 def client_lookup_cb(x, status, more, lset, arg):
+    log.info("{} lookup completed".format(lset.name))
     g.sets[lset.name] = lset
     pset = PrdcrSet(lset)
     g.prdcr_sets[lset.name] = pset
@@ -222,7 +225,7 @@ def client_proc():
         g.cond.wait()
     g.cond.release()
     assert(g.num_lookups == g.num_sets)
-    log.info("lookup completed")
+    log.info("all lookup completed")
 
     # periodically update sets
     while False:

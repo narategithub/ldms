@@ -341,6 +341,12 @@ static char *format_4tuple(struct zap_ep *ep, char *str, size_t len)
 	zap_ugni_log("zap_ugni: %s():%d " FMT, __func__, __LINE__, ##__VA_ARGS__); \
 } while(0)
 
+#ifdef DEBUG
+#define DLLOG(FMT, ...) LLOG(FMT, __VA_ARGS__)
+#else
+#define DLLOG(FMT, ...) /* no-op */
+#endif
+
 #if 0
 #define DEBUG
 #define CONN_DEBUG
@@ -448,6 +454,7 @@ static struct z_ugni_debug_stat {
 	int active_send;
 	int active_rdma;
 } z_ugni_stat = {0};
+static int z_ugni_stat_log_enabled = 1;
 
 
 
@@ -2737,7 +2744,7 @@ static int z_ugni_submit_pending_rdma(struct z_ugni_io_thread *thr)
 		goto out;
 	uep = wr->uep;
 	Z_GNI_API_LOCK(uep->ep.thread);
-	#ifdef EP_LOG_ENABLED
+#ifdef EP_LOG_ENABLED
 	const char *op = "UNKNOWN";
 	if (wr->post_desc->post.type == GNI_POST_RDMA_GET) {
 		op = "read";
@@ -2757,14 +2764,14 @@ static int z_ugni_submit_pending_rdma(struct z_ugni_io_thread *thr)
 			assert(0 == "BAD TYPE");
 		}
 	}
-	#endif
+#endif
 	EP_LOG(uep, "resume %s %p\n", op, wr);
 #ifdef DEBUG
 	if (wr->type == Z_UGNI_WR_RDMA) {
 		LLOG("%p posting RDMA read/write %p\n", uep, wr);
 	} else {
 		int msg_type = ntohs(wr->send_wr->msg->hdr.msg_type);
-		LLOG("%p posting SEND %s (%d) %p\n",
+		LLOG("%p posting SEND over RDMA PUT %s (%d) %p\n",
 		     uep, zap_ugni_msg_type_str(msg_type), msg_type, wr);
 	}
 #endif
@@ -2806,6 +2813,7 @@ static int __on_wr_send_comp(struct z_ugni_io_thread *thr,struct z_ugni_wr *wr, 
 	ATOMIC_INC(&z_ugni_stat.active_send, -1);
 	if (grc != GNI_RC_SUCCESS)
 		zev.status = ZAP_ERR_RESOURCE;
+	DLLOG("Send completed\n");
 	switch (wr->type) {
 	case Z_UGNI_WR_SEND_MAPPED:
 		zev.context = wr->send_wr->ctxt;
@@ -2915,7 +2923,6 @@ static int z_ugni_handle_rcq_smsg(struct z_ugni_io_thread *thr, gni_cq_entry_t c
 	struct z_ugni_ep *uep;
 	struct z_ugni_msg_buf_ent *ent;
 	struct z_ugni_wr *wr;
-	gni_return_t grc;
 	int msg_type;
 	int rc = 0;
 
@@ -2945,9 +2952,16 @@ static int z_ugni_handle_rcq_smsg(struct z_ugni_io_thread *thr, gni_cq_entry_t c
 		process_uep_msg_unknown(uep);
 	}
 	ent->status.processed = 1;
-	/* ack the message. ack does not need credit */
 	wr = z_ugni_alloc_ack_wr(uep, uep->mbuf->curr_rbuf_idx);
+	wr->state = Z_UGNI_WR_PENDING;
+# if 0
+	TAILQ_INSERT_HEAD(&thr->pending_rdma_wrq, wr, entry);
+#else
+	/* ack the message. ack does not need credit */
+	gni_return_t grc;
+	EP_THR_LOCK(uep);
 	Z_GNI_API_LOCK(uep->ep.thread);
+	DLLOG("Posting ACK (SEND over RDMA PUT)\n");
 	wr->post_desc->post.post_id = __sync_fetch_and_add(&ugni_post_id, 1);
 	grc = GNI_PostRdma(uep->rdma_ep, wr->post);
 	Z_GNI_API_UNLOCK(uep->ep.thread);
@@ -2956,11 +2970,14 @@ static int z_ugni_handle_rcq_smsg(struct z_ugni_io_thread *thr, gni_cq_entry_t c
 		LLOG("GNI_PostRdma() error: %d\n", grc);
 		assert(0 == "GNI_PostRdma() failed");
 		rc = ECOMM;
+		EP_THR_UNLOCK(uep);
 		goto out;
 	}
 	TAILQ_INSERT_TAIL(&thr->submitted_rdma_wrq, wr, entry);
 	wr->state = Z_UGNI_WR_SUBMITTED;
 	uep->mbuf->curr_rbuf_idx = (uep->mbuf->curr_rbuf_idx + 1) % ZAP_UGNI_EP_MSG_CREDIT;
+	EP_THR_UNLOCK(uep);
+#endif
 	goto next;
  out:
 	EP_THR_LOCK(uep);
@@ -3816,9 +3833,10 @@ static void *z_ugni_io_thread_proc(void *arg)
 	 */
 	THR_LOCK(thr);
 	z_ugni_submit_pending_rdma(thr);
-	if (was_not_empty && TAILQ_EMPTY(&thr->submitted_rdma_wrq)
-			  && TAILQ_EMPTY(&thr->pending_rdma_wrq)
-			  && TAILQ_EMPTY(&thr->ooo_rdma_wrq)) {
+	if (z_ugni_stat_log_enabled && was_not_empty
+			&& TAILQ_EMPTY(&thr->submitted_rdma_wrq)
+			&& TAILQ_EMPTY(&thr->pending_rdma_wrq)
+			&& TAILQ_EMPTY(&thr->ooo_rdma_wrq)) {
 		LLOG("send queue empty, z_ugni_stat: \n"
 		     "  z_ugni_stat.send_submitted: %d\n"
 		     "  z_ugni_stat.send_completed: %d\n"
