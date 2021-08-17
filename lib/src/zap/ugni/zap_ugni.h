@@ -463,8 +463,9 @@ struct z_ugni_ep {
 #ifdef EP_LOG_ENABLED
 	FILE *log;
 #endif
-	/* for pending requests */
-	struct z_ugni_wrq pending_wrq;
+	struct z_ugni_wrq pending_wrq; /* pending msg send */
+	struct z_ugni_wrq flushed_wrq; /* flushed entries from thr */
+	int active_send; /* submitted to thr, but not completed */
 
 	struct z_ugni_msg_buf *mbuf;
 };
@@ -553,9 +554,10 @@ struct z_ugni_io_thread {
 	 * These are protected by zap_io_thread.mutex.
 	 * These tail queues are used to prevent CQ overrun and are used for
 	 * handling out-of-order completions. */
-	struct z_ugni_wrq pending_rdma_wrq;
-	struct z_ugni_wrq submitted_rdma_wrq;
-	struct z_ugni_wrq ooo_rdma_wrq; /* out_of_order */
+	struct z_ugni_wrq pending_wrq;
+	struct z_ugni_wrq submitted_wrq;
+	struct z_ugni_wrq ooo_wrq; /* out_of_order */
+	struct z_ugni_wrq stalled_wr;
 	int post_credit; /* post credit to prevent cq overrun */
 	uint64_t wr_seq; /* wr sequence number */
 	/* ---------------------------------------- */

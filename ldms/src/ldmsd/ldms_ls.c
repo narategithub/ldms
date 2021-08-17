@@ -1052,7 +1052,7 @@ done:
 	ldms_xprt_close(ldms);
 	struct timespec _t;
 	clock_gettime(CLOCK_REALTIME, &_t);
-	_t.tv_sec += 2;
+	_t.tv_sec += 20;
 	sem_timedwait(&conn_sem, &_t);
 
 	exit(0);

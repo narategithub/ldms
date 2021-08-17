@@ -3734,11 +3734,14 @@ extern ldms_set_t ldms_xprt_set_by_name(ldms_t x, const char *set_name)
 		return NULL;
 	pthread_mutex_lock(&x->lock);
 	rbn = rbt_find(&x->set_coll, set);
-	if (rbn)
+	if (rbn) {
 		ref_get(&set->ref, "ldms_xprt_set_by_name");
-	else
+		ref_put(&set->ref, "__ldms_find_local_set");
+	} else {
+		ref_put(&set->ref, "__ldms_find_local_set");
 		set = NULL;
-	ref_put(&set->ref, "__ldms_find_local_set");
+	}
+	pthread_mutex_unlock(&x->lock);
 	return set;
 }
 
