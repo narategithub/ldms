@@ -77,9 +77,9 @@
 
 #if 1
 #   define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
-#   define ZAP_UGNI_EP_MSG_CREDIT 4
-#   define ZAP_UGNI_RDMA_CQ_DEPTH (1024*1024)
-#   define ZAP_UGNI_SMSG_CQ_DEPTH (1024*1024)
+#   define ZAP_UGNI_EP_MSG_CREDIT 16
+#   define ZAP_UGNI_RDMA_CQ_DEPTH (4*1024*1024)
+#   define ZAP_UGNI_SMSG_CQ_DEPTH (4*1024*1024)
 #   define ZAP_UGNI_RCQ_DEPTH (4*1024*1024)
 #   define ZAP_UGNI_POST_CREDIT (128)
 #endif
