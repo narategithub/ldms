@@ -77,7 +77,7 @@
 
 #if 1
 #   define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
-#   define ZAP_UGNI_EP_MSG_CREDIT 16
+#   define ZAP_UGNI_EP_MSG_CREDIT 4
 #   define ZAP_UGNI_RDMA_CQ_DEPTH (4*1024*1024)
 #   define ZAP_UGNI_SMSG_CQ_DEPTH (4*1024*1024)
 #   define ZAP_UGNI_RCQ_DEPTH (4*1024*1024)
@@ -421,7 +421,7 @@ struct z_ugni_ep {
 	uint8_t ugni_term_recv:1; /* TERM msg has been received */
 	uint8_t ugni_ack_term_sent:1; /* ACK_TERM msg has been sent */
 	uint8_t ugni_ack_term_recv:1; /* ACK_TERM msg has been received */
-	gni_ep_handle_t rdma_ep; /* for rdma */
+	gni_ep_handle_t gni_ep;
 
 	struct z_ugni_ev uev;
 	struct zap_event conn_ev;
@@ -481,6 +481,12 @@ struct z_ugni_msg_buf_ent {
 	} status;
 };
 
+/* represents recv buffer status */
+struct z_ugni_rbuf_status {
+	uint8_t  avail:1;
+	uint64_t reserved:63;
+};
+
 /** recv buffer for an endpoint */
 struct z_ugni_msg_buf {
 	int curr_rbuf_idx; /* current recv buffer index */
@@ -490,6 +496,10 @@ struct z_ugni_msg_buf {
 	/* Our sbuf will be copied to peer's rbuf using RDMA PUT. sbuf[i] will
 	 * be copied to the peer's rbuf[i]. */
 	struct z_ugni_msg_buf_ent sbuf[ZAP_UGNI_EP_MSG_CREDIT];
+	/* Peer will write to rbuf_status[i] to let us know if peer's rbuf[i]
+	 * is available. */
+	struct z_ugni_rbuf_status peer_rbuf_status[ZAP_UGNI_EP_MSG_CREDIT];
+	struct z_ugni_rbuf_status our_rbuf_status[ZAP_UGNI_EP_MSG_CREDIT];
 };
 
 struct z_ugni_io_thread {
@@ -558,6 +568,7 @@ struct z_ugni_io_thread {
 	struct z_ugni_wrq submitted_wrq;
 	struct z_ugni_wrq ooo_wrq; /* out_of_order */
 	struct z_ugni_wrq stalled_wr;
+	struct z_ugni_wrq ack_wrq; /* higher precedence */
 	int post_credit; /* post credit to prevent cq overrun */
 	uint64_t wr_seq; /* wr sequence number */
 	/* ---------------------------------------- */
