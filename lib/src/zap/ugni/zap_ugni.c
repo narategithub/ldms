@@ -456,8 +456,9 @@ static struct z_ugni_debug_stat {
 	int active_send;
 	int active_rdma;
 	int active_ack;
+	int pending_ack;
 } z_ugni_stat = {0};
-static int z_ugni_stat_log_enabled = 1;
+static int z_ugni_stat_log_enabled = 0;
 
 
 
@@ -851,7 +852,7 @@ static struct z_ugni_wr *z_ugni_alloc_ack_wr(struct z_ugni_ep *uep, int idx)
 	if (!wr)
 		return NULL;
 	wr->state = Z_UGNI_WR_INIT;
-	wr->type = Z_UGNI_WR_RECV_ACK;
+	wr->type = Z_UGNI_WR_SEND_RECV_ACK;
 	wr->uep = uep;
 	wr->send_wr->hdr_len = sizeof(struct zap_ugni_msg_recv_ack);
 	wr->send_wr->msg_len = sizeof(struct zap_ugni_msg_recv_ack);
@@ -862,6 +863,7 @@ static struct z_ugni_wr *z_ugni_alloc_ack_wr(struct z_ugni_ep *uep, int idx)
 	/* our rbuf[idx].status writes to peer's sbuf[idx].status */
 	peer_off = (char*)&uep->mbuf->peer_rbuf_status[idx] - (char*)uep->mbuf;
 
+	wr->send_wr->buf_idx = idx;
 	wr->send_wr->post.type = GNI_POST_RDMA_PUT;
 	wr->send_wr->post.cq_mode = GNI_CQMODE_GLOBAL_EVENT | GNI_CQMODE_REMOTE_EVENT;
 	wr->send_wr->post.dlvr_mode = GNI_DLVMODE_IN_ORDER;
@@ -2809,7 +2811,7 @@ static int z_ugni_thr_submit_pending(struct z_ugni_io_thread *thr,
 		ATOMIC_INC(&z_ugni_stat.send_submitted, 1);
 		ATOMIC_INC(&z_ugni_stat.active_send, 1);
 		break;
-	case Z_UGNI_WR_RECV_ACK:
+	case Z_UGNI_WR_SEND_RECV_ACK:
 		ATOMIC_INC(&z_ugni_stat.ack_submitted, 1);
 		ATOMIC_INC(&z_ugni_stat.active_ack, 1);
 		break;
@@ -2960,7 +2962,7 @@ static int z_ugni_handle_rcq_msg(struct z_ugni_io_thread *thr, gni_cq_entry_t cq
 	if (!uep)
 		return 0;
 	__get_ep(&uep->ep, "rcq");
- next:
+ loop:
 	/* we're the only thread accessing / modifying rbuf and curr_rbuf_idx,
 	 * so no lock is required */
 	ent = &uep->mbuf->rbuf[uep->mbuf->curr_rbuf_idx];
@@ -2984,43 +2986,52 @@ static int z_ugni_handle_rcq_msg(struct z_ugni_io_thread *thr, gni_cq_entry_t cq
 	}
 	ent->status.processed = 1;
 	uep->mbuf->our_rbuf_status[uep->mbuf->curr_rbuf_idx].avail = 1;
-	if (need_ack) {
-		wr = z_ugni_alloc_ack_wr(uep, uep->mbuf->curr_rbuf_idx);
-		wr->state = Z_UGNI_WR_PENDING;
-#if 1
-		THR_LOCK(thr);
-		TAILQ_INSERT_TAIL(&thr->pending_wrq, wr, entry);
-		uep->mbuf->curr_rbuf_idx = (uep->mbuf->curr_rbuf_idx + 1) % ZAP_UGNI_EP_MSG_CREDIT;
-		THR_UNLOCK(thr);
-#else
-		/* ack the message. ack does not need credit */
-		gni_return_t grc;
-		THR_LOCK(thr);
-		Z_GNI_API_LOCK(uep->ep.thread);
-		DLLOG("Posting ACK (SEND over RDMA PUT)\n");
-		wr->post_desc->post.post_id = __sync_fetch_and_add(&ugni_post_id, 1);
-		grc = GNI_PostRdma(uep->gni_ep, wr->post);
-		Z_GNI_API_UNLOCK(uep->ep.thread);
-		if (grc != GNI_RC_SUCCESS) {
-			EP_LOG(uep, "error GNI_PostRdma(ACK) %p\n", wr);
-			LLOG("GNI_PostRdma() error: %d\n", grc);
-			rc = ECOMM;
-			THR_UNLOCK(thr);
-			EP_LOCK(uep);
-			z_ugni_ep_error(uep);
-			EP_UNLOCK(uep);
-			THR_LOCK(thr);
-			z_ugni_thr_ep_flush(thr, uep);
-			THR_UNLOCK(thr);
-			goto err;
-		}
-		TAILQ_INSERT_TAIL(&thr->submitted_wrq, wr, entry);
-		wr->state = Z_UGNI_WR_SUBMITTED;
-		uep->mbuf->curr_rbuf_idx = (uep->mbuf->curr_rbuf_idx + 1) % ZAP_UGNI_EP_MSG_CREDIT;
-		THR_UNLOCK(thr);
-#endif
+	if (!need_ack)
+		goto next;
+
+	/* we're the only thread accessing ack_status */
+	if (uep->mbuf->ack_status[uep->mbuf->curr_rbuf_idx].outstanding) {
+		assert(uep->mbuf->ack_status[uep->mbuf->curr_rbuf_idx].pending == 0);
+		uep->mbuf->ack_status[uep->mbuf->curr_rbuf_idx].pending = 1;
+		goto next;
 	}
-	goto next;
+
+	uep->mbuf->ack_status[uep->mbuf->curr_rbuf_idx].outstanding = 1;
+	wr = z_ugni_alloc_ack_wr(uep, uep->mbuf->curr_rbuf_idx);
+	wr->state = Z_UGNI_WR_PENDING;
+#if 1
+	TAILQ_INSERT_TAIL(&thr->ack_wrq, wr, entry);
+#else
+	/* ack the message. ack does not need credit */
+	gni_return_t grc;
+	THR_LOCK(thr);
+	Z_GNI_API_LOCK(uep->ep.thread);
+	DLLOG("Posting ACK (SEND over RDMA PUT)\n");
+	wr->post_desc->post.post_id = __sync_fetch_and_add(&ugni_post_id, 1);
+	grc = GNI_PostRdma(uep->gni_ep, wr->post);
+	Z_GNI_API_UNLOCK(uep->ep.thread);
+	if (grc != GNI_RC_SUCCESS) {
+		EP_LOG(uep, "error GNI_PostRdma(ACK) %p\n", wr);
+		LLOG("GNI_PostRdma() error: %d\n", grc);
+		rc = ECOMM;
+		THR_UNLOCK(thr);
+		EP_LOCK(uep);
+		z_ugni_ep_error(uep);
+		EP_UNLOCK(uep);
+		THR_LOCK(thr);
+		z_ugni_thr_ep_flush(thr, uep);
+		THR_UNLOCK(thr);
+		goto err;
+	}
+	TAILQ_INSERT_TAIL(&thr->submitted_wrq, wr, entry);
+	wr->state = Z_UGNI_WR_SUBMITTED;
+	uep->mbuf->curr_rbuf_idx = (uep->mbuf->curr_rbuf_idx + 1) % ZAP_UGNI_EP_MSG_CREDIT;
+	THR_UNLOCK(thr);
+#endif
+ next:
+	/* done with this cell */
+	uep->mbuf->curr_rbuf_idx = (uep->mbuf->curr_rbuf_idx + 1) % ZAP_UGNI_EP_MSG_CREDIT;
+	goto loop;
  out:
 	EP_LOCK(uep);
 	THR_LOCK(thr);
@@ -3143,9 +3154,8 @@ static void z_ugni_release_wr(struct z_ugni_wr *wr)
 	case Z_UGNI_WR_SEND_MAPPED:
 		z_ugni_put_post_credit(thr);
 		break;
-	case Z_UGNI_WR_RECV_ACK:
+	case Z_UGNI_WR_SEND_RECV_ACK:
 		z_ugni_put_post_credit(thr);
-		/* no-op: ack didn't take credit */
 		break;
 	}
 	z_ugni_free_wr(wr);
@@ -3209,24 +3219,59 @@ static void z_ugni_handle_scq_events(struct z_ugni_io_thread *thr,
 		goto next;
 	}
 	grc = GNI_CQ_GET_STATUS(cqe);
+	assert( grc == 0 );
 	wr = __container_of(post, struct z_ugni_wr, post_desc);
 	uep = wr->uep;
 
 	switch (wr->type) {
 	case Z_UGNI_WR_RDMA:
+		if (grc)
+			LLOG("Z_UGNI_WR_RDMA error: %d\n", grc);
 		__on_wr_rdma_comp(thr, wr, grc);
-		break;
+		goto release_wr;
 	case Z_UGNI_WR_SEND:
 	case Z_UGNI_WR_SEND_MAPPED:
+		if (grc)
+			LLOG("Z_UGNI_WR_SEND/SEND_MAPPED error: %d\n", grc);
 		__on_wr_send_comp(thr, wr, grc);
-		break;
-	case Z_UGNI_WR_RECV_ACK:
+		goto release_wr;
+	case Z_UGNI_WR_SEND_RECV_ACK:
+		if (grc)
+			LLOG("Z_UGNI_WR_SEND_RECV_ACK error: %d\n", grc);
 		ATOMIC_INC(&z_ugni_stat.ack_completed, 1);
 		ATOMIC_INC(&z_ugni_stat.active_ack, -1);
 		/* no-op, just free the associated wr */
-		break;
+		assert(uep->mbuf->ack_status[wr->send_wr->buf_idx].outstanding == 1);
+		if (uep->mbuf->ack_status[wr->send_wr->buf_idx].pending) {
+			/* reuse wr to submit ACK */
+			uep->mbuf->ack_status[wr->send_wr->buf_idx].pending = 0;
+			TAILQ_REMOVE(&thr->submitted_wrq, wr, entry);
+			z_ugni_put_post_credit(thr);
+
+			EP_LOCK(uep);
+			switch (uep->ep.state) {
+			case ZAP_EP_ERROR:
+			case ZAP_EP_CLOSE:
+			case ZAP_EP_PEER_CLOSE:
+				EP_UNLOCK(uep);
+				goto release_wr;
+			default:
+				/* no-op */ ;
+			}
+			wr->state = Z_UGNI_WR_PENDING;
+			TAILQ_INSERT_TAIL(&thr->ack_wrq, wr, entry);
+			THR_LOCK(thr);
+			uep_submit_pending(uep);
+			THR_UNLOCK(thr);
+			EP_UNLOCK(uep);
+
+			goto next;
+		}
+		uep->mbuf->ack_status[wr->send_wr->buf_idx].outstanding = 0;
+		goto release_wr;
 	}
 
+ release_wr:
 	assert(GNI_CQ_OVERRUN(cqe) == 0); /* rcq OVERRUN */
 	EP_LOCK(uep);
 	THR_LOCK(thr);
@@ -3380,7 +3425,7 @@ static int wr_zap_event(struct z_ugni_wr *wr, struct zap_event *zev)
 			return EINVAL;
 		}
 		break;
-	case Z_UGNI_WR_RECV_ACK:
+	case Z_UGNI_WR_SEND_RECV_ACK:
 		return ENOENT;
 	}
 	assert(0 == "BAD TYPE");
@@ -3411,6 +3456,8 @@ static void z_ugni_flush(struct z_ugni_ep *uep, struct z_ugni_io_thread *thr)
 	int rc;
 
 	THR_LOCK(thr);
+
+	z_ugni_thr_ep_flush(thr, uep);
 
 	wr = TAILQ_FIRST(&thr->ack_wrq);
 	while (wr) {
@@ -3969,11 +4016,14 @@ static void *z_ugni_io_thread_proc(void *arg)
 		     z_ugni_stat.send_completed,
 		     z_ugni_stat.rdma_submitted,
 		     z_ugni_stat.rdma_completed,
+		     z_ugni_stat.ack_submitted,
+		     z_ugni_stat.ack_completed,
 		     z_ugni_stat.recv_success,
 		     z_ugni_stat.rcq_success,
 		     z_ugni_stat.rcq_rc_not_done,
 		     z_ugni_stat.active_rdma,
-		     z_ugni_stat.active_send);
+		     z_ugni_stat.active_send,
+		     z_ugni_stat.active_ack);
 	}
 	THR_UNLOCK(thr);
 

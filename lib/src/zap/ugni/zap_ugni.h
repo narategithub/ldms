@@ -77,7 +77,7 @@
 
 #if 1
 #   define ZAP_UGNI_THREAD_EP_MAX 2048 /* max endpoints per thread */
-#   define ZAP_UGNI_EP_MSG_CREDIT 4
+#   define ZAP_UGNI_EP_MSG_CREDIT 8
 #   define ZAP_UGNI_RDMA_CQ_DEPTH (4*1024*1024)
 #   define ZAP_UGNI_SMSG_CQ_DEPTH (4*1024*1024)
 #   define ZAP_UGNI_RCQ_DEPTH (4*1024*1024)
@@ -331,6 +331,7 @@ struct zap_ugni_send_wr {
 	gni_post_descriptor_t post;
 	TAILQ_ENTRY(zap_ugni_send_wr) link;
 	struct z_ugni_msg_buf_ent *sbuf;
+	int buf_idx;
 	void  *ctxt; /* for send_mapped completion */
 	int    flags; /* various wr flags */
 	uint32_t msg_id; /* ep_idx(16-bit)|smsg_seq(16-bit) */
@@ -372,7 +373,7 @@ struct z_ugni_wr {
 		Z_UGNI_WR_RDMA,
 		Z_UGNI_WR_SEND,
 		Z_UGNI_WR_SEND_MAPPED,
-		Z_UGNI_WR_RECV_ACK,
+		Z_UGNI_WR_SEND_RECV_ACK,
 	} type;
 	enum {
 		Z_UGNI_WR_INIT,
@@ -487,6 +488,12 @@ struct z_ugni_rbuf_status {
 	uint64_t reserved:63;
 };
 
+struct z_ugni_ack_status {
+	uint8_t outstanding:1;
+	uint8_t pending:1;
+	uint64_t reserved:62;
+};
+
 /** recv buffer for an endpoint */
 struct z_ugni_msg_buf {
 	int curr_rbuf_idx; /* current recv buffer index */
@@ -496,10 +503,27 @@ struct z_ugni_msg_buf {
 	/* Our sbuf will be copied to peer's rbuf using RDMA PUT. sbuf[i] will
 	 * be copied to the peer's rbuf[i]. */
 	struct z_ugni_msg_buf_ent sbuf[ZAP_UGNI_EP_MSG_CREDIT];
-	/* Peer will write to rbuf_status[i] to let us know if peer's rbuf[i]
-	 * is available. */
+
+	/* Peer will write to peer_rbuf_status[i] to let us know if peer's
+	 * rbuf[i] is available. */
 	struct z_ugni_rbuf_status peer_rbuf_status[ZAP_UGNI_EP_MSG_CREDIT];
+
+	/* our_rbuf_status[i] is used as a source buffer to RDMA PUT to peer's
+	 * peer_rbuf_status[i].
+	 */
 	struct z_ugni_rbuf_status our_rbuf_status[ZAP_UGNI_EP_MSG_CREDIT];
+
+	/* track the ACK we send to peer. When `outstanding` is 1, the previous
+	 * ACK has not been completed yet. Hence, we should not post a new ACK
+	 * of the same cell. This can happen by peer receiving the ACK (that has
+	 * not been completed yet on our end), and send the new message (this is
+	 * totally legit since the recv cell on our end has become available).
+	 * The new message then arrived but the old ACK has not completed yet.
+	 * In this case, the `pending` will be switch to 1. So that when the
+	 * previous ACK completed, we will submit another ACK and reset
+	 * everything in the corresponding cell to 0.
+	 */
+	struct z_ugni_ack_status ack_status[ZAP_UGNI_EP_MSG_CREDIT];
 };
 
 struct z_ugni_io_thread {
