@@ -3479,9 +3479,9 @@ static void z_ugni_flush(struct z_ugni_ep *uep, struct z_ugni_io_thread *thr)
 		TAILQ_INSERT_TAIL(&thr->stalled_wrq, wr, entry);
 		wr->uep = NULL;
 		wr->state = Z_UGNI_WR_STALLED;
+		z_ugni_put_post_credit(thr);
 		rc = wr_zap_event(wr, &zev);
 		if (rc == 0) {
-			z_ugni_put_post_credit(thr);
 			/* deliver flush event */
 			THR_UNLOCK(thr);
 			EP_UNLOCK(uep);
@@ -3985,6 +3985,8 @@ static void *z_ugni_io_thread_proc(void *arg)
 			break;
 		}
 	}
+	/* desperate ... */
+	z_ugni_handle_scq_events(thr, thr->rdma_cq, GNI_CQ_EVENT_TYPE_POST);
 
 	/*
 	 * NOTE: zap_ugni need to submit pending entry here because when it
