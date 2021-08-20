@@ -81,7 +81,9 @@
 #   define ZAP_UGNI_RDMA_CQ_DEPTH (4*1024*1024)
 #   define ZAP_UGNI_SMSG_CQ_DEPTH (4*1024*1024)
 #   define ZAP_UGNI_RCQ_DEPTH (4*1024*1024)
-#   define ZAP_UGNI_POST_CREDIT (128)
+#   define ZAP_UGNI_RDMA_POST_CREDIT (64)
+#   define ZAP_UGNI_MSG_POST_CREDIT (32)
+#   define ZAP_UGNI_ACK_POST_CREDIT (32)
 #endif
 
 /* This is used by handle rendezvous */
@@ -464,7 +466,7 @@ struct z_ugni_ep {
 #ifdef EP_LOG_ENABLED
 	FILE *log;
 #endif
-	struct z_ugni_wrq pending_wrq; /* pending msg send */
+	struct z_ugni_wrq pending_msg_wrq; /* pending msg send */
 	struct z_ugni_wrq flushed_wrq; /* flushed entries from thr */
 	int active_send; /* submitted to thr, but not completed */
 
@@ -588,12 +590,15 @@ struct z_ugni_io_thread {
 	 * These are protected by zap_io_thread.mutex.
 	 * These tail queues are used to prevent CQ overrun and are used for
 	 * handling out-of-order completions. */
-	struct z_ugni_wrq pending_wrq;
+	struct z_ugni_wrq pending_msg_wrq;
+	struct z_ugni_wrq pending_rdma_wrq;
 	struct z_ugni_wrq submitted_wrq;
 	struct z_ugni_wrq ooo_wrq; /* out_of_order */
 	struct z_ugni_wrq stalled_wr;
 	struct z_ugni_wrq ack_wrq; /* higher precedence */
-	int post_credit; /* post credit to prevent cq overrun */
+	int rdma_post_credit;
+	int msg_post_credit;
+	int ack_post_credit;
 	uint64_t wr_seq; /* wr sequence number */
 	/* ---------------------------------------- */
 
