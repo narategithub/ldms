@@ -74,8 +74,6 @@
 #include "coll/rbt.h"
 #include "mmalloc/mmalloc.h"
 
-// #define EP_LOG_ENABLED
-
 #include "zap_ugni.h"
 
 #ifdef EP_LOG_ENABLED
@@ -96,15 +94,17 @@
  * NOTE on `zap_ugni`
  * ==================
  *
- * The TCP sockets are used to initiate connections, and to listen. In a near
- * future, the sockets will be removed entirely.
+ * The TCP sockets are used to initiate connections, and to listen. The socket
+ * will be closed after the the peers (passive side and active side) finished
+ * exchanging information to setup GNI endpoint bind. See "Connecting mechanism"
+ * below for more information.
  *
  *
  * Threads and endpoints
  * ---------------------
  *
- * `io_thread_proc()` is the thread procedure of all zap thread for `zap_ugni`.
- * The thread uses `epoll` to manage events from 1) sockets, 2) the GNI
+ * `io_thread_proc()` is the thread procedure for all `zap_ugni` zap threads.
+ * The threads use `epoll` to manage events from 1) sockets, 2) the GNI
  * Completion Queue (CQ) via Completion Channel, and 3) the `zap_ugni` event
  * queue `zq` for timeout events and connection events.
  *
@@ -112,12 +112,15 @@
  * until it is destroyed (no thread migration).
  *
  * Regarding GNI resources, each thread has 1 completion channel, 1 local CQ,
- * and 1 remote (msg recv) CQ which are shared among the endpoints assigned to
+ * and 1 remote (msg recv) CQ. They are shared among the endpoints assigned to
  * the thread. We need to use 2 CQs because the documentation of
- * `GNI_CqCreate()` said so. We also tried it out with 1 CQ and found out that
- * the remote completion entry cannot be used to determine the type of the
- * completion (GNI_CQ_GET_TYPE()). It reported `GNI_CQ_EVENT_TYPE_POST` instead
- * of `GNI_CQ_EVENT_TYPE_SMSG`.
+ * `GNI_CqCreate()` said so. Originally, we tried using SMSG to handle
+ * messaging, and tried it out with 1 CQ and found out that the remote
+ * completion entry cannot be used to determine the type of the completion
+ * (GNI_CQ_GET_TYPE()). It reported `GNI_CQ_EVENT_TYPE_POST` instead of
+ * `GNI_CQ_EVENT_TYPE_SMSG`. However, even with separate CQs, we were not
+ * successful with SMSG and had to implement send/recv with RDMA PUT instead.
+ * This will be discussed in details later.
  *
  * The completion channel has a file descriptor that can be used with epoll. The
  * CQs are attached to the completion channel. After the CQs are armed, they
@@ -125,16 +128,227 @@
  * processed. This makes completion channel file descriptor ready to be read and
  * epoll wakes the thread up to process the completion events.
  *
- * `zq` is an additional event queue for each thread that manages timeout events
- * and connection events (CONNECTED, CONN_ERROR and DISCONNECTED). The
- * connection events could result in a recursive application callback
- * or calling application callback from a thread other than the associated io
- * thread are put into `zq` to avoid such situations. An example would be a
- * synchronous error of send/read/write that may be called from other theads or
- * from within the application callback path. The synchronous error immediately
- * put the endpoint in error state, then result in either DISCONNECT or
- * CONN_ERROR events in `zq`.
+ * The `zq` is an additional event queue that manages timeout events and
+ * connection events (CONNECTED, CONN_ERROR and DISCONNECTED). The connection
+ * events could result in a recursive application callback or calling
+ * application callback from a thread other than the associated io thread. The
+ * connection events are put into `zq` to avoid such situations. An example
+ * would be a synchronous error of send/read/write that may be called from other
+ * theads or from within the application callback path. The synchronous error
+ * immediately put the endpoint in error state, then resulted in either
+ * DISCONNECT or CONN_ERROR events in `zq`.
  *
+ *
+ * Unsuccessful tries with SMSG
+ * ----------------------------
+ *
+ * `zap_ugni` used to rely on TCP socket for messaging while the GNI endpoint
+ * only handled RDMA operation. When the multiple-zap-io-thread model was
+ * introduced, it was a good time to also modify `zap_ugni` to not rely on TCP
+ * socket for send/recv and use pure GNI utilities.
+ *
+ * At first, we tried SMSG with 1 remote cq to handle recv, and 1 local cq to
+ * handle both SMSG send completion and RDMA GET/PUT (read/write) completions.
+ * In the first setup, the application threads can directly call
+ * `GNI_SmsgSend()` and `GNI_PostRdma()` (but the calls are protected by the
+ * api mutex). This setup however quickly resulted in a `GNI_RC_INVALID_PARAM`
+ * returned by `GNI_PostRdma()`.
+ *
+ * So, we moved the `GNI_SmsgSend()` and `GNI_PostRdma()` calls into the IO
+ * thread, so that we limit the cq's access to only a single thread (still
+ * protected by the api mutex). It delayed the error, but eventually we still
+ * get `GNI_RC_INVALID_PARAM` from `GNI_PostRdma()`. Some other times, the test
+ * program stalled. The posted RDMA requests were never completed (even when we
+ * desperately try to reap CQ every 100 ms).
+ *
+ * The next setup was having 1 remote cq for SMSG recv, 1 local smsg send cq,
+ * and 1 local rdma cq. This yielded the same results as the previous setup.
+ *
+ * So, finally, we tried implementing zap_ugni messaging using RDMA PUT instead.
+ *
+ *
+ * Messaging over RDMA PUT
+ * -----------------------
+ *
+ * The `dst_cq_hndl` parameter in `GNI_MemRegister()` is the destination
+ * completion queue that will be notified when a remote pee RDMA or FMA PUT data
+ * into the memory region. So, we use this mechanism to implement `zap_ugni`
+ * message send/recv.
+ *
+ * Let's first laid out resources related to send/recv.
+ *
+ * * Each IO thread handles multiple endpoints. When an endpoint is assigned to
+ *   an IO thread, it stays there (no thread migration).
+ * * When and enpoint is assigned to a thread, an endpoint index (`ep_idx`) is
+ *   also assigned to it. The thread can use `ep_idx` to get to the endpoint,
+ *   and thread-provided resources assoicated to the endpoint.
+ * * Each IO thread has:
+ *   * Array of message buffers (mbuf). mbuf[idx] is a send-and-recv buffer for
+ *     the endpoint with index `idx`. The entire mbuf array is
+ *     `GNI_MemRegister()` so that the endpoint can use the send buffer part to
+ *     send messages with RDMA PUT, and the recv buffer part to receive the RDMA
+ *     PUT from the peer.
+ *   * 1 recv cq (rcq). With `GNI_MemRegister(mbuf, rcq)`, GNI system will
+ *     put a CQ entry into `rcq` when the peer RDMA PUT data into mbuf.
+ *   * 1 local cq (scq) -- a local submission completion queue. Note that scq is
+ *     used for `zap_read` (RDMA GET), `zap_write` (RDMA PUT), `zap_send` (RDMA
+ *     PUT) and other `zap_ugni`-specific message send (RDMA PUT).
+ * * The mbuf for an endpoint contains:
+ *   * mbuf.rbuf[N] : N recv buffer (see struct z_ugni_msg_buf_ent).
+ *   * mbuf.sbuf[N] : N send buffer (see struct z_ugni_msg_buf_ent).
+ *     * our sbuf[i] will RDMA PUT to peer's rbuf[i] and vice-versa.
+ *     * sbuf and rbuf are `struct z_ugni_msg_buf_ent`, which is a chunk of
+ *       memory described as follows:
+ *       * msg ( MAX_LEN - 8 bytes )
+ *       * status ( last 8 bytes ) : currently only have 1 bitfield:
+ *         * processed
+ *           * For send buffer, processed being 1 means the send has completed
+ *           * For recv buffer, processed being 1 means the buffer has already
+ *             been processed.
+ *   * mbuf.curr_rbuf_idx : the index of current rbuf to be processed
+ *   * mbuf.curr_sbuf_idx : the index of current sbuf to be used for RDMA PUT
+ *   * mbuf.peer_rbuf_status[N] : an array of peer's rbuf status (availability).
+ *                                The peer RDMA PUT into this memory to let us
+ *                                know about its recv buffer status so that we
+ *                                won't RDMA PUT peer's rbuf when it is not
+ *                                ready.
+ *   * mbuf.our_rbuf_status[N] : an array of our rbuf status. This is actually
+ *                               the source to RDMA PUT to update peer's
+ *                               mbuf.peer_rbuf_status[N] so that the peer knows
+ *                               the status of our recv buffer. Copying
+ *                               our_rbuf_status[i] to peer's
+ *                               peer_rbuf_status[i] is basically an ACK,
+ *                               letting the peer knows that our rbuf[i] has
+ *                               been received, processed and ready for peer to
+ *                               RDMA PUT new data into our rbuf[i].
+ *     * rbuf_status currently has only 1 bitfield:
+ *       * avail : 1 iff rbuf is availble
+ *   * mbuf.ack_status[N] : track the status of RDMA PUT for ACK.
+ *     * ack_status currently has 2 bitfields:
+ *       * outstanding : 1 if ACK submitted but not completed
+ *       * pending : 1 if we received a message but still has an outstanding
+ *                   ACK. This can happen by the peer receiving our first ACK
+ *                   and send another message into our rbuf before our ACK has
+ *                   completed. Since our previous ACK is still not completed,
+ *                   we will mark the pending bit to 1, and the ACK of the
+ *                   latest receive will be sent when the previous ACK
+ *                   completed.
+ *//*
+ *
+ * Initially, everything in `mbuf` is set to 0.
+ *
+ * Sending side:
+ * - A zap_ugni send work request (send WR) is created.
+ * - If the `pending_msg_wrq` is not empty,
+ *   or ep->mbuf->sbuf[ep->mbuf->curr_sbuf_idx].status.processed == 0, (send not completed)
+ *   or ep->mbuf->peer_rbuf_status[ep->mbuf->curr_sbuf_idx].avail == 0 (corresponding peer's rbuf not available)
+ *   (in other words, if there are prior pending WR or our sbuf is not ready or peer's rbuf is not ready)
+ *   then ==> append the WR to endpoint's pending_msg_wrq. The send mechanism
+ *   ends here in this case. The pending WR in the endpoint's pending_msg_wrq
+ *   will be processed later when the outstanding sbuf has completed and the
+ *   corresponding remote rbuf is available.
+ * - otherwise, take the current sbuf[i], set `sbuf[i].status.processed = 0`,
+ *   set `peer_rbuf_status[i].avail = 0`, and assigned sbuf[i] to the WR. Then,
+ *   modulo-increase `ep->mbuf->curr_sbuf_idx` (the next sbuf for the next
+ *   send). Then append the WR to thread's `thr->pending_msg_wrq` and notify the
+ *   thread.
+ * - The thread wakes up and process the send WR by:
+ *   - `GNI_RdmaPost()` RDMA PUT our WR sbuf[i] to the corresponding peer's
+ *     rbuf[i]. Notice that our sbuf[i].status.processed being 0 will make
+ *     peer's rbuf[i].status.processed being 0 too. Then, the peer will know
+ *     that rbuf[i] is a new message.
+ * - When the RDMA PUT completed, the thread wakes up again and process the
+ *   srq completion entry. The WR sbuf[i].status.processed is set to 1 to mark
+ *   that the sbuf[i] is ready to use (doesn't mean that the peer's rbuf[i] is
+ *   ready to receive though). Note that sbuf[i] may or may not be the current
+ *   sbuf to be assigned for the next RDMA PUT. At this point, the pending send
+ *   WR in the endpoint `ep->pending_msg_wrq` will have a chance to try to
+ *   obtain the sbuf[curr_sbuf_idx].
+ *   - If sbuf[curr_sbuf_idx].status.processed == 1, and
+ *        peer_rbuf_status[curr_sbuf_idx].avail == 1:
+ *     then, sbuf[curr_sbuf_idx] can be assigned to the WR (and modulo-increase
+ *     curr_sbuf_idx). Similar to above, the WR is moved into
+ *     `thr->pending_msg_wrq` and will be processed in the same way (but we
+ *     don't have to notify the thread since we're already in the thread).
+ * - When the peer finished processing the rbuf[i], the peer will write to our
+ *   `peer_rbuf_status[i]`. This will wake up the io thread with rcq completion
+ *   event. From the event, we will get the endpoint and will try to process the
+ *   pending WR in the endpoint like the send completion case above.
+ *
+ * - NOTE1: msg WR in the endpoint pending queue is not ready for
+ *          `GNI_PostRdma()` as it does not have sbuf[i] assigned to it yet.
+ *          If it were to be put into the thread pending queue, it will block
+ *          other entries.
+ *
+ * - NOTE2: The msg WRs in the thread's `thr->pending_msg_wrq` were ready for
+ *          `GNI_PostRdma()`. However, we want to control the number of
+ *          outstanding GNI posts to avoid overwhelming GNI resources. Thus, the
+ *          `thr->pending_msg_wrq` and `thr->msg_post_credit` are used to
+ *          control the outstanding posts regarding messaging. Originally, this
+ *          was not separated from RDMA WR queue. But, when we have so many RDMA
+ *          requests, the msg WR could not compete because it has to obtain the
+ *          sbuf before moving into the thread WR queue. This resulted in
+ *          message processing starvation. Separating the message and RDMA
+ *          queues solved the starvation issue.
+ *//*
+ * Receiving side:
+ * - When our endpoint's rbuf[i] is written, the io thread wakes up and process
+ *   the CQ entry in the rcq. The recv CQ entry only contain a reference to the
+ *   endpoint and nothing more (it is actually the endpoint ID value we sent to
+ *   the remote socket at the beginning of the connection and the remote peer
+ *   set the `remote_value` in the peer's `GNI_EpSetEventData()` with the value
+ *   we sent). In other words, when the io thread wakes up by the rcq entry, we
+ *   don't know which rbuf or which peer_rbuf_status got written. We just know
+ *   that the witten data is in rbuf or peer_rbuf_status of the endpoint
+ *   identified by the endpoint ID from the rcq entry. Hence, the
+ *   `curr_rbuf_idx` tracks which rbuf[i] shall be processed next. Note that the
+ *   RDMA PUT may not arrive in order. Hence, io thread may wake up to find out
+ *   that the current rbuf is not ready to process yet. Thus, when the io thread
+ *   process rcq, it will try to consume as many endpoint rbufs as possible to
+ *   process the possible out-of-order RDMA PUT delivery.
+ * - If rbuf[curr_rbuf_idx].status.processed is 0 (note that the peer RDMA PUT
+ *   peer's sbuf[i] with sbuf[i].status.processed = 0), the rbuf[curr_rbuf_idx]
+ *   is ready to be processed.
+ *   - After the rbuf[curr_rbuf_idx] is processed,
+ *     rbuf[curr_rbuf_idx].status.processed is set to 1.
+ *   - Now, the rbuf[curr_rbuf_idx] become available and we need to let the peer
+ *     know by RDMA PUT to peer's peer_rbuf_status[curr_rbuf_idx]. This is
+ *     basically a recv acknowledgement and has ACK WR to handle it. But, before
+ *     we create the ACK WR, we must check if we have an outstanding ACK
+ *     (ack_status[curr_rbuf_idx].outstanding == 1).
+ *     - If we have an outstanding, simply:
+ *       - set ack_status[curr_rbuf_idx].pending = 1, and
+ *       - modulo-increase `curr_rbuf_idx` and try to process the next rbuf.
+ *       - In this case, the pending ACK will be executed when the outstanding
+ *         RDMA PUT of the outstanding ACK is completed.
+ *     - If we don't have outstanding ACK:
+ *       - set `our_rbuf_status[curr_rbuf_idx].avail = 1`.
+ *       - set `ack_status[curr_rbuf_idx].outstanding = 1`.
+ *       - create ACK WR for curr_rbuf_idx. It will use
+ *         `our_rbuf_status[curr_rbuf_idx]` to RDMA PUT to peer's
+ *         `peer_rbuf_status[curr_rbuf_idx]`. Put ACK WR into the thead
+ *         pending_ack_wrq. It will be processed/submitted after the thread
+ *         finishes processing completions in scq/rcq.
+ * - When the RDMA PUT for the ACK WR is completed, check if
+ *   ack_status[i].pending is 1. If so, submit another ACK WR for the rbuf[i]
+ *   and reset ack_stats[i].pending to 0. Note that we have at most 1 ACK
+ *   pending because the peer won't be able to write to our rbuf[i] if we didn't
+ *   ACK (except for the first send).
+ * - At the end of rcq entry processing, we also try to submit the send WR
+ *   pending in the endpoint.
+ *
+ * - NOTE-1: We put rbuf[i].status at the end because RDMA PUT seems to copy
+ *   data from low-byte to high-byte. When we place rbuf[i].status at the
+ *   beginning, we expereinced receiving message with old garbage data. The
+ *   speculation was that RDMA PUT was working on the *NEXT* rbuf around the
+ *   time that current rbuf was completed and notified. Then, the
+ *   `rbuf[next].status` being at the beginning was copied first and hence the
+ *   io thread misunderstood that the next rbuf was ready and process it while
+ *   it was not .. resulting in garbage message. The problem has not shown up
+ *   anymore after we move the status to the back of the buffer (hence the
+ *   speculation above).
+ *
+ *//*
  *
  * Connecting mechanism
  * --------------------
@@ -342,14 +556,9 @@ static char *format_4tuple(struct zap_ep *ep, char *str, size_t len)
 } while(0)
 
 #ifdef DEBUG
-#define DLLOG(FMT, ...) LLOG(FMT, __VA_ARGS__)
+#define DLLOG(FMT, ...) LLOG(FMT, ## __VA_ARGS__)
 #else
 #define DLLOG(FMT, ...) /* no-op */
-#endif
-
-#if 0
-#define DEBUG
-#define CONN_DEBUG
 #endif
 
 #ifdef DEBUG
@@ -652,12 +861,12 @@ static void z_ugni_ep_idx_init(struct z_ugni_io_thread *thr)
 	int i;
 	for (i = 0; i < ZAP_UGNI_THREAD_EP_MAX; i++) {
 		ep_idx[i].idx = i;
-		ep_idx[i].next_idx = i+1;
+		ep_idx[i].next_free_idx = i+1;
 		ep_idx[i].uep = NULL;
 	}
-	ep_idx[ZAP_UGNI_THREAD_EP_MAX-1].next_idx = 0;
-	thr->ep_idx_head = &ep_idx[0];
-	thr->ep_idx_tail = &ep_idx[ZAP_UGNI_THREAD_EP_MAX-1];
+	ep_idx[ZAP_UGNI_THREAD_EP_MAX-1].next_free_idx = 0;
+	thr->free_ep_idx_head = &ep_idx[0];
+	thr->free_ep_idx_tail = &ep_idx[ZAP_UGNI_THREAD_EP_MAX-1];
 }
 
 /* assign a free ep_idx to uep. Must hold thr->zap_io_thread.mutex */
@@ -673,18 +882,18 @@ static int z_ugni_ep_idx_assign(struct z_ugni_ep *uep)
 		assert(0 == "uep->ep_idx is NOT NULL");
 		return 0;
 	}
-	idx = thr->ep_idx_head->next_idx;
+	idx = thr->free_ep_idx_head->next_free_idx;
 	if (!idx)
 		return ENOMEM;
 	curr = &ep_idx[idx];
-	next = &ep_idx[curr->next_idx];
+	next = &ep_idx[curr->next_free_idx];
 
 	/* remove curr from the free list */
-	thr->ep_idx_head->next_idx = next->idx;
-	curr->next_idx = 0;
+	thr->free_ep_idx_head->next_free_idx = next->idx;
+	curr->next_free_idx = 0;
 
 	if (next->idx == 0) { /* also reset tail if list depleted */
-		thr->ep_idx_tail = thr->ep_idx_head;
+		thr->free_ep_idx_tail = thr->free_ep_idx_head;
 	}
 
 	/* assign curr to uep */
@@ -709,10 +918,10 @@ static void z_ugni_ep_idx_release(struct z_ugni_ep *uep)
 	}
 
 	/* insert tail */
-	thr->ep_idx_tail->next_idx = uep->ep_idx->idx;
-	uep->ep_idx->next_idx = 0;
+	thr->free_ep_idx_tail->next_free_idx = uep->ep_idx->idx;
+	uep->ep_idx->next_free_idx = 0;
 	/* update tail */
-	thr->ep_idx_tail = uep->ep_idx;
+	thr->free_ep_idx_tail = uep->ep_idx;
 
 	/* release uep/ep_idx */
 	uep->ep_idx->uep = NULL;
@@ -733,7 +942,7 @@ static inline int z_ugni_get_post_credit(struct z_ugni_io_thread *thr, struct z_
 	case Z_UGNI_WR_SEND_MAPPED:
 		credit = &thr->msg_post_credit;
 		break;
-	case Z_UGNI_WR_SEND_RECV_ACK:
+	case Z_UGNI_WR_RECV_ACK:
 		credit = &thr->ack_post_credit;
 		break;
 	default:
@@ -759,7 +968,7 @@ static inline void z_ugni_put_post_credit(struct z_ugni_io_thread *thr, struct z
 	case Z_UGNI_WR_SEND_MAPPED:
 		credit = &thr->msg_post_credit;
 		break;
-	case Z_UGNI_WR_SEND_RECV_ACK:
+	case Z_UGNI_WR_RECV_ACK:
 		credit = &thr->ack_post_credit;
 		break;
 	default:
@@ -882,10 +1091,8 @@ static struct z_ugni_wr *z_ugni_alloc_ack_wr(struct z_ugni_ep *uep, int idx)
 	if (!wr)
 		return NULL;
 	wr->state = Z_UGNI_WR_INIT;
-	wr->type = Z_UGNI_WR_SEND_RECV_ACK;
+	wr->type = Z_UGNI_WR_RECV_ACK;
 	wr->uep = uep;
-	wr->send_wr->hdr_len = sizeof(struct zap_ugni_msg_recv_ack);
-	wr->send_wr->msg_len = sizeof(struct zap_ugni_msg_recv_ack);
 
 	msg_seq = __atomic_fetch_add(&uep->next_msg_seq, 1, __ATOMIC_SEQ_CST);
 	wr->send_wr->msg_id = (uep->ep_idx->idx << 16)|(msg_seq);
@@ -972,20 +1179,18 @@ static struct z_ugni_wr *z_ugni_alloc_send_wr(struct z_ugni_ep *uep,
 
 static struct z_ugni_wr *z_ugni_alloc_post_desc(struct z_ugni_ep *uep)
 {
-	struct zap_ugni_post_desc *d;
-	struct z_ugni_wr *wr = calloc(1, sizeof(*wr) + sizeof(*wr->post_desc));
+	struct zap_ugni_rdma_wr *d;
+	struct z_ugni_wr *wr = calloc(1, sizeof(*wr) + sizeof(*wr->rdma_wr));
 	if (!wr)
 		return NULL;
 	wr->uep = uep;
 	wr->type = Z_UGNI_WR_RDMA;
 	wr->state = Z_UGNI_WR_INIT;
-	d = wr->post_desc;
-	//ref_get(&uep->ep.ref, "alloc post desc");
+	d = wr->rdma_wr;
 #ifdef DEBUG
 	d->ep_gn = zap_ugni_get_ep_gn(uep->ep_id);
 #endif /* DEBUG */
 	format_4tuple(&uep->ep, d->ep_name, ZAP_UGNI_EP_NAME_SZ);
-	//LIST_INSERT_HEAD(&uep->post_desc_list, d, ep_link);
 	return wr;
 }
 
@@ -1161,7 +1366,7 @@ static zap_err_t z_ugni_close(zap_ep_t ep)
 			__zap_ep_state_str(uep->ep.state));
 	EP_LOCK(uep);
 	if (self != ep->thread->thread) {
-		while (!TAILQ_EMPTY(&uep->pending_msg_wrq) && uep->active_send) {
+		while (!TAILQ_EMPTY(&uep->pending_msg_wrq) && uep->active_wr) {
 			pthread_cond_wait(&uep->sq_cond, &uep->ep.lock);
 		}
 	}
@@ -1553,7 +1758,6 @@ static void process_uep_msg_connect(struct z_ugni_ep *uep)
 
 	DLOG_(uep, "CONN_REQ received: pe_addr: %#x, inst_id: %#x\n",
 			msg->ep_desc.pe_addr, msg->ep_desc.inst_id);
-	uep->app_owned = 1;
 	EP_UNLOCK(uep);
 
 	struct zap_event ev = {
@@ -1735,7 +1939,7 @@ process_uep_msg_fn_t process_uep_msg_fns[] = {
 #define min_t(t, x, y) (t)((t)x < (t)y?(t)x:(t)y)
 
 int zap_ugni_err_handler(gni_cq_handle_t cq, gni_cq_entry_t cqe,
-			 struct zap_ugni_post_desc *desc)
+			 struct zap_ugni_rdma_wr *desc)
 {
 	uint32_t recoverable = 0;
 	char errbuf[512];
@@ -2384,7 +2588,6 @@ zap_ep_t z_ugni_new(zap_t z, zap_cb_fn_t cb)
 	uep->sock = -1;
 	uep->ep_id = -1;
 	uep->node_id = -1;
-	uep->app_owned = 1;
 
 	TAILQ_INIT(&uep->pending_msg_wrq);
 	TAILQ_INIT(&uep->flushed_wrq);
@@ -2610,7 +2813,7 @@ static zap_err_t z_ugni_read(zap_ep_t ep, zap_map_t src_map, char *src,
 		zerr = ZAP_ERR_RESOURCE;
 		goto out;
 	}
-	struct zap_ugni_post_desc *desc = wr->post_desc;
+	struct zap_ugni_rdma_wr *desc = wr->rdma_wr;
 
 	desc->post.type = GNI_POST_RDMA_GET;
 	desc->post.cq_mode = GNI_CQMODE_GLOBAL_EVENT;
@@ -2620,7 +2823,7 @@ static zap_err_t z_ugni_read(zap_ep_t ep, zap_map_t src_map, char *src,
 	desc->post.remote_addr = (uint64_t)src;
 	desc->post.remote_mem_hndl = *src_mh;
 	desc->post.length = sz;
-	desc->post.src_cq_hndl = thr->rdma_cq;
+	desc->post.src_cq_hndl = thr->scq;
 
 	desc->context = context;
 #ifdef DEBUG
@@ -2684,7 +2887,7 @@ static zap_err_t z_ugni_write(zap_ep_t ep, zap_map_t src_map, char *src,
 		zerr = ZAP_ERR_RESOURCE;
 		goto out;
 	}
-	struct zap_ugni_post_desc *desc = wr->post_desc;
+	struct zap_ugni_rdma_wr *desc = wr->rdma_wr;
 
 	desc->post.type = GNI_POST_RDMA_PUT;
 	desc->post.cq_mode = GNI_CQMODE_GLOBAL_EVENT;
@@ -2717,8 +2920,8 @@ void z_ugni_io_thread_cleanup(void *arg)
 		GNI_CompChanDestroy(thr->cch);
 	if (thr->rcq)
 		GNI_CqDestroy(thr->rcq);
-	if (thr->rdma_cq)
-		GNI_CqDestroy(thr->rdma_cq);
+	if (thr->scq)
+		GNI_CqDestroy(thr->scq);
 	if (thr->mbuf_mh.qword1 || thr->mbuf_mh.qword2)
 		GNI_MemDeregister(_dom.nic, &thr->mbuf_mh);
 	if (thr->efd > -1)
@@ -2785,9 +2988,9 @@ static int z_ugni_thr_submit_pending(struct z_ugni_io_thread *thr,
 	Z_GNI_API_LOCK(uep->ep.thread);
 #ifdef EP_LOG_ENABLED
 	const char *op = "UNKNOWN";
-	if (wr->post_desc->post.type == GNI_POST_RDMA_GET) {
+	if (wr->rdma_wr->post.type == GNI_POST_RDMA_GET) {
 		op = "read";
-	} else if (wr->post_desc->post.type == GNI_POST_RDMA_PUT) {
+	} else if (wr->rdma_wr->post.type == GNI_POST_RDMA_PUT) {
 		op = "write";
 		switch (wr->type) {
 		case Z_UGNI_WR_SEND:
@@ -2814,7 +3017,7 @@ static int z_ugni_thr_submit_pending(struct z_ugni_io_thread *thr,
 		     uep, zap_ugni_msg_type_str(msg_type), msg_type, wr);
 	}
 #endif
-	wr->post_desc->post.post_id = __sync_fetch_and_add(&ugni_post_id, 1);
+	wr->rdma_wr->post.post_id = __sync_fetch_and_add(&ugni_post_id, 1);
 	grc = GNI_PostRdma(uep->gni_ep, wr->post);
 	Z_GNI_API_UNLOCK(uep->ep.thread);
 	if (grc != GNI_RC_SUCCESS) {
@@ -2841,7 +3044,7 @@ static int z_ugni_thr_submit_pending(struct z_ugni_io_thread *thr,
 		ATOMIC_INC(&z_ugni_stat.send_submitted, 1);
 		ATOMIC_INC(&z_ugni_stat.active_send, 1);
 		break;
-	case Z_UGNI_WR_SEND_RECV_ACK:
+	case Z_UGNI_WR_RECV_ACK:
 		ATOMIC_INC(&z_ugni_stat.ack_submitted, 1);
 		ATOMIC_INC(&z_ugni_stat.active_ack, 1);
 		break;
@@ -2896,9 +3099,9 @@ static int __on_wr_rdma_comp(struct z_ugni_io_thread *thr,struct z_ugni_wr *wr, 
 	ATOMIC_INC(&z_ugni_stat.active_rdma, -1);
 	#ifdef EP_LOG_ENABLED
 	const char *op = "UNKNOWN";
-	if (wr->post_desc->post.type == GNI_POST_RDMA_GET) {
+	if (wr->rdma_wr->post.type == GNI_POST_RDMA_GET) {
 		op = "read";
-	} else if (wr->post_desc->post.type == GNI_POST_RDMA_PUT) {
+	} else if (wr->rdma_wr->post.type == GNI_POST_RDMA_PUT) {
 		op = "write";
 	}
 	#endif
@@ -2915,7 +3118,7 @@ static int __on_wr_rdma_comp(struct z_ugni_io_thread *thr,struct z_ugni_wr *wr, 
 		 */
 		goto out;
 	}
-	post = &wr->post_desc->post;
+	post = &wr->rdma_wr->post;
 	struct z_ugni_ep *uep = wr->uep;
 	EP_LOG(uep, "complete %s %p (grc: %d)\n", op, wr, grc);
 	if (!uep) {
@@ -2924,13 +3127,9 @@ static int __on_wr_rdma_comp(struct z_ugni_io_thread *thr,struct z_ugni_wr *wr, 
 		 * the segmentation fault and to record the situation.
 		 */
 		LOG("%s: %s: desc->uep = NULL. Drop the descriptor.\n", __func__,
-			wr->post_desc->ep_name);
+			wr->rdma_wr->ep_name);
 		goto out;
 	}
-#ifdef DEBUG
-	if (uep->deferred_link.le_prev)
-		LOG_(uep, "uep %p: Doh!! I'm on the deferred list.\n", uep);
-#endif /* DEBUG */
 	zev.ep = &uep->ep;
 	switch (post->type) {
 	case GNI_POST_RDMA_GET:
@@ -2945,7 +3144,7 @@ static int __on_wr_rdma_comp(struct z_ugni_io_thread *thr,struct z_ugni_wr *wr, 
 			zev.status = ZAP_ERR_OK;
 		}
 		zev.type = ZAP_EVENT_READ_COMPLETE;
-		zev.context = wr->post_desc->context;
+		zev.context = wr->rdma_wr->context;
 		break;
 	case GNI_POST_RDMA_PUT:
 		/* could be zap_write, zap_send or zap_send_map completions */
@@ -2960,7 +3159,7 @@ static int __on_wr_rdma_comp(struct z_ugni_io_thread *thr,struct z_ugni_wr *wr, 
 			zev.status = ZAP_ERR_OK;
 		}
 		zev.type = ZAP_EVENT_WRITE_COMPLETE;
-		zev.context = wr->post_desc->context;
+		zev.context = wr->rdma_wr->context;
 		break;
 	default:
 		LOG_(uep, "Unknown completion type %d.\n",
@@ -3029,35 +3228,7 @@ static int z_ugni_handle_rcq_msg(struct z_ugni_io_thread *thr, gni_cq_entry_t cq
 	uep->mbuf->ack_status[uep->mbuf->curr_rbuf_idx].outstanding = 1;
 	wr = z_ugni_alloc_ack_wr(uep, uep->mbuf->curr_rbuf_idx);
 	wr->state = Z_UGNI_WR_PENDING;
-#if 1
-	TAILQ_INSERT_TAIL(&thr->ack_wrq, wr, entry);
-#else
-	/* ack the message. ack does not need credit */
-	gni_return_t grc;
-	THR_LOCK(thr);
-	Z_GNI_API_LOCK(uep->ep.thread);
-	DLLOG("Posting ACK (SEND over RDMA PUT)\n");
-	wr->post_desc->post.post_id = __sync_fetch_and_add(&ugni_post_id, 1);
-	grc = GNI_PostRdma(uep->gni_ep, wr->post);
-	Z_GNI_API_UNLOCK(uep->ep.thread);
-	if (grc != GNI_RC_SUCCESS) {
-		EP_LOG(uep, "error GNI_PostRdma(ACK) %p\n", wr);
-		LLOG("GNI_PostRdma() error: %d\n", grc);
-		rc = ECOMM;
-		THR_UNLOCK(thr);
-		EP_LOCK(uep);
-		z_ugni_ep_error(uep);
-		EP_UNLOCK(uep);
-		THR_LOCK(thr);
-		z_ugni_thr_ep_flush(thr, uep);
-		THR_UNLOCK(thr);
-		goto err;
-	}
-	TAILQ_INSERT_TAIL(&thr->submitted_wrq, wr, entry);
-	wr->state = Z_UGNI_WR_SUBMITTED;
-	uep->mbuf->curr_rbuf_idx = (uep->mbuf->curr_rbuf_idx + 1) % ZAP_UGNI_EP_MSG_CREDIT;
-	THR_UNLOCK(thr);
-#endif
+	TAILQ_INSERT_TAIL(&thr->pending_ack_wrq, wr, entry);
  next:
 	/* done with this cell */
 	uep->mbuf->curr_rbuf_idx = (uep->mbuf->curr_rbuf_idx + 1) % ZAP_UGNI_EP_MSG_CREDIT;
@@ -3068,9 +3239,6 @@ static int z_ugni_handle_rcq_msg(struct z_ugni_io_thread *thr, gni_cq_entry_t cq
 	uep_submit_pending(uep);
 	THR_UNLOCK(thr);
 	EP_UNLOCK(uep);
-#if 0
- err:
-#endif
 	__put_ep(&uep->ep, "rcq");
 	return rc;
 }
@@ -3156,8 +3324,7 @@ static void uep_submit_pending(struct z_ugni_ep *uep)
 			/* need send buff */
 			if (0 == z_ugni_get_sbuf(uep, wr))
 				goto out;
-			uep->active_send++;
-			// LLOG("Moving pending WR %p from EP to THR\n", wr);
+			uep->active_wr++;
 			TAILQ_REMOVE(&uep->pending_msg_wrq, wr, entry);
 			TAILQ_INSERT_TAIL(&thr->pending_msg_wrq, wr, entry);
 			wr->seq = thr->wr_seq++;
@@ -3232,7 +3399,7 @@ static void z_ugni_handle_scq_events(struct z_ugni_io_thread *thr,
 	}
 	post = NULL;
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	grc = GNI_GetCompleted(thr->rdma_cq, cqe, &post);
+	grc = GNI_GetCompleted(thr->scq, cqe, &post);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (grc != GNI_RC_SUCCESS) {
 		LOG("GNI_GetCompleted() error: %d\n", grc);
@@ -3240,7 +3407,7 @@ static void z_ugni_handle_scq_events(struct z_ugni_io_thread *thr,
 	}
 	grc = GNI_CQ_GET_STATUS(cqe);
 	assert( grc == 0 );
-	wr = __container_of(post, struct z_ugni_wr, post_desc);
+	wr = __container_of(post, struct z_ugni_wr, rdma_wr);
 	uep = wr->uep;
 
 	switch (wr->type) {
@@ -3255,9 +3422,9 @@ static void z_ugni_handle_scq_events(struct z_ugni_io_thread *thr,
 			LLOG("Z_UGNI_WR_SEND/SEND_MAPPED error: %d\n", grc);
 		__on_wr_send_comp(thr, wr, grc);
 		goto release_wr;
-	case Z_UGNI_WR_SEND_RECV_ACK:
+	case Z_UGNI_WR_RECV_ACK:
 		if (grc)
-			LLOG("Z_UGNI_WR_SEND_RECV_ACK error: %d\n", grc);
+			LLOG("Z_UGNI_WR_RECV_ACK error: %d\n", grc);
 		ATOMIC_INC(&z_ugni_stat.ack_completed, 1);
 		ATOMIC_INC(&z_ugni_stat.active_ack, -1);
 		/* no-op, just free the associated wr */
@@ -3279,7 +3446,7 @@ static void z_ugni_handle_scq_events(struct z_ugni_io_thread *thr,
 				/* no-op */ ;
 			}
 			wr->state = Z_UGNI_WR_PENDING;
-			TAILQ_INSERT_TAIL(&thr->ack_wrq, wr, entry);
+			TAILQ_INSERT_TAIL(&thr->pending_ack_wrq, wr, entry);
 			THR_LOCK(thr);
 			uep_submit_pending(uep);
 			THR_UNLOCK(thr);
@@ -3295,8 +3462,8 @@ static void z_ugni_handle_scq_events(struct z_ugni_io_thread *thr,
 	assert(GNI_CQ_OVERRUN(cqe) == 0); /* rcq OVERRUN */
 	EP_LOCK(uep);
 	THR_LOCK(thr);
-	uep->active_send--;
-	if (0 == uep->active_send && TAILQ_EMPTY(&uep->pending_msg_wrq))
+	uep->active_wr--;
+	if (0 == uep->active_wr && TAILQ_EMPTY(&uep->pending_msg_wrq))
 		pthread_cond_signal(&uep->sq_cond);
 	TAILQ_REMOVE(&thr->submitted_wrq, wr, entry);
 	z_ugni_release_wr(wr);
@@ -3333,7 +3500,7 @@ static void z_ugni_handle_cq_event(struct z_ugni_io_thread *thr)
 
 	if (cq == thr->rcq)
 		z_ugni_handle_rcq_events(thr);
-	else if (cq == thr->rdma_cq)
+	else if (cq == thr->scq)
 		z_ugni_handle_scq_events(thr, cq, GNI_CQ_EVENT_TYPE_POST);
 }
 
@@ -3382,7 +3549,6 @@ static void z_ugni_sock_conn_request(struct z_ugni_ep *uep)
 	new_uep = (void*) new_ep;
 	new_uep->sock = sockfd;
 	new_uep->ep.state = ZAP_EP_ACCEPTING;
-	new_uep->app_owned = 0;
 
 	new_uep->sock_epoll_ctxt.type = Z_UGNI_SOCK_EVENT;
 
@@ -3434,18 +3600,18 @@ static int wr_zap_event(struct z_ugni_wr *wr, struct zap_event *zev)
 		switch (wr->post->type) {
 		case GNI_POST_RDMA_GET:
 			zev->type = ZAP_EVENT_READ_COMPLETE;
-			zev->context = wr->post_desc->context;
+			zev->context = wr->rdma_wr->context;
 			return 0;
 		case GNI_POST_RDMA_PUT:
 			zev->type = ZAP_EVENT_WRITE_COMPLETE;
-			zev->context = wr->post_desc->context;
+			zev->context = wr->rdma_wr->context;
 			return 0;
 		default:
 			assert(0 == "BAD TYPE");
 			return EINVAL;
 		}
 		break;
-	case Z_UGNI_WR_SEND_RECV_ACK:
+	case Z_UGNI_WR_RECV_ACK:
 		return ENOENT;
 	}
 	assert(0 == "BAD TYPE");
@@ -3483,12 +3649,12 @@ static void z_ugni_flush(struct z_ugni_ep *uep, struct z_ugni_io_thread *thr)
 
 	z_ugni_thr_ep_flush(thr, uep);
 
-	wr = TAILQ_FIRST(&thr->ack_wrq);
+	wr = TAILQ_FIRST(&thr->pending_ack_wrq);
 	while (wr) {
 		next_wr = TAILQ_NEXT(wr, entry);
 		if (wr->uep != uep) /* not our WR */
 			goto next_ack;
-		TAILQ_REMOVE(&thr->ack_wrq, wr, entry);
+		TAILQ_REMOVE(&thr->pending_ack_wrq, wr, entry);
 		z_ugni_free_wr(wr);
 	next_ack:
 		wr = next_wr;
@@ -3623,7 +3789,6 @@ static int z_ugni_setup_conn(struct z_ugni_ep *uep, struct z_ugni_ep_desc *ep_de
 	uep->peer_ep_desc = *ep_desc;
 	/* bind remote endpoint (RDMA) */
 	Z_GNI_API_LOCK(uep->ep.thread);
-	// LLOG("Binding ...\n");
 	grc = GNI_EpBind(uep->gni_ep, ep_desc->pe_addr, ep_desc->inst_id);
 	Z_GNI_API_UNLOCK(uep->ep.thread);
 	if (grc != GNI_RC_SUCCESS) {
@@ -4011,7 +4176,7 @@ static void *z_ugni_io_thread_proc(void *arg)
 		}
 	}
 	/* desperate ... */
-	z_ugni_handle_scq_events(thr, thr->rdma_cq, GNI_CQ_EVENT_TYPE_POST);
+	z_ugni_handle_scq_events(thr, thr->scq, GNI_CQ_EVENT_TYPE_POST);
 
 	/*
 	 * NOTE: zap_ugni need to submit pending entry here because when it
@@ -4020,7 +4185,7 @@ static void *z_ugni_io_thread_proc(void *arg)
 	 * Draining all completion entries and submiting the pending entries
 	 * later (here) made the rcq OVERRUN error disappear.
 	 */
-	z_ugni_thr_submit_pending(thr, &thr->ack_wrq);
+	z_ugni_thr_submit_pending(thr, &thr->pending_ack_wrq);
 	z_ugni_thr_submit_pending(thr, &thr->pending_msg_wrq);
 	z_ugni_thr_submit_pending(thr, &thr->pending_rdma_wrq);
 	THR_LOCK(thr);
@@ -4088,9 +4253,8 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	TAILQ_INIT(&thr->pending_msg_wrq);
 	TAILQ_INIT(&thr->pending_rdma_wrq);
 	TAILQ_INIT(&thr->submitted_wrq);
-	TAILQ_INIT(&thr->ooo_wrq);
 	TAILQ_INIT(&thr->stalled_wrq);
-	TAILQ_INIT(&thr->ack_wrq);
+	TAILQ_INIT(&thr->pending_ack_wrq);
 
 	CONN_LOG("zap thread initializing ...\n");
 	rc = zap_io_thread_init(&thr->zap_io_thread, z, "zap_ugni_io",
@@ -4116,7 +4280,7 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	/* For RDMA local/source completions (posts) */
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	CONN_LOG("RDMA CqCreate ...\n");
-	rc = GNI_CqCreate(_dom.nic, ZAP_UGNI_RDMA_CQ_DEPTH, 0, GNI_CQ_BLOCKING, NULL, NULL, &thr->rdma_cq);
+	rc = GNI_CqCreate(_dom.nic, ZAP_UGNI_RDMA_CQ_DEPTH, 0, GNI_CQ_BLOCKING, NULL, NULL, &thr->scq);
 	CONN_LOG("RDMA CqCreate ... done.\n");
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc != GNI_RC_SUCCESS) {
@@ -4166,7 +4330,7 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	}
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	CONN_LOG("RDMA-CQ CqAttachCompChan ...\n");
-	rc = GNI_CqAttachCompChan(thr->rdma_cq, thr->cch);
+	rc = GNI_CqAttachCompChan(thr->scq, thr->cch);
 	CONN_LOG("RDMA-CQ CqAttachCompChan ... done\n");
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc) {
@@ -4184,7 +4348,7 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	}
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
 	CONN_LOG("Arming RDMA-CQ ...\n");
-	rc = GNI_CqArmCompChan(&thr->rdma_cq, 1);
+	rc = GNI_CqArmCompChan(&thr->scq, 1);
 	CONN_LOG("Arming RDMA-CQ ... done\n");
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (rc) {
@@ -4253,7 +4417,7 @@ zap_io_thread_t z_ugni_io_thread_create(zap_t z)
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
  err_5:
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	GNI_CqDestroy(thr->rdma_cq);
+	GNI_CqDestroy(thr->scq);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
  err_4:
 	close(thr->efd);
@@ -4276,7 +4440,7 @@ zap_err_t z_ugni_io_thread_cancel(zap_io_thread_t t)
 	case ESRCH: /* cleaning up structure w/o running thread b/c of fork */
 		thr->cch = 0;
 		thr->rcq = 0;
-		thr->rdma_cq = 0;
+		thr->scq = 0;
 		thr->mbuf_mh.qword1 = 0;
 		thr->mbuf_mh.qword2 = 0;
 		thr->efd = -1; /* b/c of O_CLOEXEC */
@@ -4330,7 +4494,7 @@ zap_err_t z_ugni_io_thread_ep_assign(zap_io_thread_t t, zap_ep_t ep)
 	 * because we don't know which cq to attached to yet. */
 
 	Z_GNI_API_LOCK(&thr->zap_io_thread);
-	grc = GNI_EpCreate(_dom.nic, thr->rdma_cq, &uep->gni_ep);
+	grc = GNI_EpCreate(_dom.nic, thr->scq, &uep->gni_ep);
 	Z_GNI_API_UNLOCK(&thr->zap_io_thread);
 	if (grc) {
 		LOG("GNI_EpCreate(gni_ep) failed: %s\n", gni_ret_str(grc));
