@@ -361,45 +361,50 @@
  * - [passive] creates an endpoint and TCP `accept()` the TCP connection.
  * - [active] becomes TCP-connected and send a `z_ugni_sock_msg_conn_req`
  *            message over the socket. The message contains information needed
- *            by the passive side to setup the GNI SMSG.
+ *            by the passive side to bind GNI endpoint and set endpoint event
+ *            data.
  * - [passive] becomes TCP-connected, and receives `z_ugni_sock_msg_conn_req`
- *             message over the socket. Then, if the protocol version matched,
- *             setup GNI SMSG (also bind GNI endpoint) according to the
- *             information in the received message, and replies with
- *             `z_ugni_sock_msg_conn_accept` message over the socket that
- *             contain similar data needed to setup the SMSG on the active side.
- *             Next, close the TCP socket as it is not needed anymore. The
- *             communication from this point will use GNI SMSG. If the protocol
- *             version does not match or other errors occur, terminates the TCP
- *             connection.
- * - [active] receives `z_ugni_sock_msg_conn_accept` and setup GNI SMSG. Then,
- *            the active side closes the TCP socket as GNI SMSG is established.
- * - [NOTE] At this point both sides can use GNI SMSG to send/recv messages.
- *          The TCP socket part will soon be replaced with `GNI_EpPostData()`
- *          mechanisms. The application data supplied in `zap_connect()`,
- *          `zap_accept()`, or `zap_reject()` happened over GNI SMSG. The
- *          GNI-SMSG-based connection procedure continues as follows.
- * - [active] SMSG-sends the `ZAP_UGNI_MSG_CONNECT` message containing
- *            application connect data. A timeout event is also added into `zq`.
- *            If the connection procedure could not complete (rejected, accepted
- *            or error) within the timeout limit, connection timeout will be
- *            processed and `CONN_ERROR` is delivered to the application.
- * - [passive] SMSG-recv the `ZAP_UGNI_MSG_CONNECT` message and notify the
- *             application about connection request with the data. The
- *             application may `zap_accept()` or `zap_reject()` the connection
- *             request, which results in the passive side SMSG-sending
- *             `ZAP_UGNI_MSG_ACCEPTED` with application-supplied data or
- *             `ZAP_UGNI_MSG_REJECTED` respectively. In the case of ACCEPTED,
- *             also notify the application the CONENCTED event.
- * - [active] SMSG-recv either `ZAP_UGNI_MSG_ACCEPTED` or
- *            `ZAP_UGNI_MSG_REJECTED` and notifies the application accordingly
- *            (CONNECTED or REJECTED event).
+ *             message over the socket. If the protocol version does not match
+ *             or other errors occur, terminates the TCP connection. If the
+ *             protocol version matched, bind the GNI endpoint and set endpoint
+ *             event data according to the information in the received message,
+ *             and replies with `z_ugni_sock_msg_conn_accept` message over the
+ *             socket that contain similar data needed to bind the GNI endpoint
+ *             and set the endpoint event data on the active side.  Next, close
+ *             the TCP socket as it is not needed anymore. The communication
+ *             from this point will use messaging over RDMA PUT described in the
+ *             section above.
+ * - [active] receives `z_ugni_sock_msg_conn_accept` and bind the GNI endpoint
+ *            and set the endpoint event data. Then, the active side closes the
+ *            TCP socket as GNI endpoint is established.
+ * - [NOTE] At this point both sides can use messaging over RDMA PUT to
+ *          send/recv messages. The TCP socket part may be replaced with
+ *          `GNI_EpPostData()` mechanisms in the future. The application data
+ *          supplied in `zap_connect()`, `zap_accept()`, or `zap_reject()`
+ *          happened over RDMA PUT messaging. The connection procedure continues
+ *          as follows.
+ * - [active] Send the `ZAP_UGNI_MSG_CONNECT` message over GNI RDMA PUT
+ *            containing application connect data. A timeout event is also added
+ *            into `zq`.  If the connection procedure could not complete
+ *            (rejected, accepted or error) within the timeout limit, connection
+ *            timeout will be processed and `CONN_ERROR` is delivered to the
+ *            application.
+ * - [passive] Receive the `ZAP_UGNI_MSG_CONNECT` message over the GNI messaging
+ *             and notify the application about connection request with the
+ *             data. The application may `zap_accept()` or `zap_reject()` the
+ *             connection request, which results in the passive side
+ *             GNI sending `ZAP_UGNI_MSG_ACCEPTED` with application-supplied
+ *             data or `ZAP_UGNI_MSG_REJECTED` respectively. In the case of
+ *             ACCEPTED, also notify the application the CONENCTED event.
+ * - [active] GNI-recv either `ZAP_UGNI_MSG_ACCEPTED` or `ZAP_UGNI_MSG_REJECTED`
+ *            and notifies the application accordingly (CONNECTED or REJECTED
+ *            event).
  * - [NOTE] After this point, both active and passive sides can `zap_send()`,
  *          `zap_read()`, and `zap_write()`.
  *
  *
- * Disconnecting mechanism over GNI SMSG
- * -------------------------------------
+ * Disconnecting mechanism over GNI messaging over RDMA PUT
+ * --------------------------------------------------------
  *
  * `ZAP_UGNI_MSG_TERM` is a message to notify the peer that the local process
  * wants to terminate the connection. The local process shall not send any more
@@ -436,22 +441,22 @@
  * ```
  *
  * - [peer0] calls `zap_close()`. The endpoint state is changed to CLOSE and
- *           SMSG-send `ZAP_UGNI_MSG_TERM(0)` to peer1. A timeout event is also
+ *           GNI-send `ZAP_UGNI_MSG_TERM(0)` to peer1. A timeout event is also
  *           added to zq to force-terminate the connection when the timeout
  *           occurs before `ZAP_UGNI_MSG_ACK_TERM(0)` is received.
- * - [peer1] SMSG-recv `ZAP_UGNI_MSG_TERM(0)`. The ep state is changed to
+ * - [peer1] GNI-recv `ZAP_UGNI_MSG_TERM(0)`. The ep state is changed to
  *           PEER_CLOSE (to prevent future application send/read/write
  *           requests). Since peer1 has never sent `ZAP_UGNI_MSG_TERM(1)`,
  *           it send the message to peer0, expecting a
  *           `ZAP_UGNI_MSG_ACK_TERM(1)` back (with timeout). Then,
- *           `ZAP_UGNI_MSG_ACK_TERM(0)` is SMSG-sent to peer0 to acknowledge the
+ *           `ZAP_UGNI_MSG_ACK_TERM(0)` is GNI-sent to peer0 to acknowledge the
  *           TERM peer1 received from peer0. No messages will be sent any
  *           further from peer1.
- * - [peer0] SMSG-recv `ZAP_UGNI_MSG_TERM(1)`. peer0 does not send another
+ * - [peer0] GNI-recv `ZAP_UGNI_MSG_TERM(1)`. peer0 does not send another
  *           `ZAP_UGNI_MSG_TERM(0)` because it knows that it has already sent its
  *           TERM message. Then, peer0 GNI-sends `ZAP_UGNI_MSG_ACK_TERM(1)` to
  *           peer1.
- * - [peer0+peer1] SMSG-recv `ZAP_UGNI_MSG_ACK_TERM(0)` and
+ * - [peer0+peer1] GNI-recv `ZAP_UGNI_MSG_ACK_TERM(0)` and
  *                 `ZAP_UGNI_MSG_ACK_TERM(1)` respectively. The DISCONNECTED
  *                 event is then delivered to the application.
  *
@@ -485,21 +490,6 @@
  *                       |                             |
  *                       v                             v
  * ```
- *
- * REMARK: GNI SMSG guarantees the order to process messages. The messages on
- *         the wire may arrive out of order, but `GNI_SmsgGetNext()` guarantees
- *         the order. For example, if `msgN+1` arrives but `msgN` has not
- *         arrived yet, `GNI_SmsgGetNext()` will return `GNI_RC_NOT_DONE`. When
- *         `msgN` arrives, the first call to `GNI_SmsgGetNext()` yields `msgN`,
- *         and the next call yields `msgN+1`. In `zap_ugni`,
- *         `z_ugni_handle_rcq_msg()` keeps calling `GNI_SmsgGetNext()` and
- *         process the message until it returns `GNI_RC_NOT_DONE`.
- *
- *
- * NOTE on slow connection: `GNI_MemRegister()` with recv CQ for SMSG mbox took
- * 0.6-0.7 sec. Fortunately this occurs only once in each io thread. Short-lived
- * zap application like `ldms_ls` would see the effect of this slow connection
- * the most.
  *
  */
 
@@ -3568,9 +3558,9 @@ static void z_ugni_sock_conn_request(struct z_ugni_ep *uep)
 
 	/*
 	 * NOTE: At this point, the connection is socket-connected. The next
-	 * step would be setting up GNI EP and SMSG service. The active side
-	 * will send z_ugni_sock_send_conn_req message over socket to initiate
-	 * the setup.
+	 * step would be setting up GNI EP and messaging resources. The active
+	 * side will send z_ugni_sock_send_conn_req message over socket to
+	 * initiate the setup.
 	 */
 
 	return;
@@ -3752,7 +3742,7 @@ static int z_ugni_sock_send_conn_req(struct z_ugni_ep *uep)
 static int z_ugni_sock_send_conn_accept(struct z_ugni_ep *uep)
 {
 	/* NOTE: This is not the application accept message. It is a socket
-	 *       message agreeing to establish GNI SMSG communication. */
+	 *       message agreeing to establish GNI communication. */
 	/* uep->ep.lock is held */
 	int n;
 	struct z_ugni_sock_msg_conn_accept msg;
@@ -3882,7 +3872,7 @@ static void z_ugni_sock_recv(struct z_ugni_ep *uep)
 		rc = z_ugni_sock_send_conn_accept(uep);
 		if (rc)
 			goto err;
-		/* GNI SMSG established, socket not needed anymore */
+		/* GNI endpoint established, socket not needed anymore */
 		z_ugni_disable_sock(uep);
 		break;
 	case ZAP_UGNI_MSG_ACCEPTED:
@@ -3900,7 +3890,7 @@ static void z_ugni_sock_recv(struct z_ugni_ep *uep)
 		rc = z_ugni_setup_conn(uep, &conn_accept->ep_desc);
 		if (rc)
 			goto err;
-		/* GNI SMSG established, socket not needed anymore */
+		/* GNI endpoint established, socket not needed anymore */
 		z_ugni_disable_sock(uep);
 		zerr = z_ugni_send_connect(uep);
 		if (zerr) {
