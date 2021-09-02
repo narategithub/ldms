@@ -1235,6 +1235,7 @@ static int __send_lookup_reply(struct ldms_xprt *x, struct ldms_set *set,
 	msg->lookup.more = htonl(more);
 	msg->lookup.data_len = htonl(__le32_to_cpu(set->meta->data_sz));
 	msg->lookup.meta_len = htonl(__le32_to_cpu(set->meta->meta_sz));
+	msg->lookup.heap_len = htonl(__le32_to_cpu(set->meta->heap_sz));
 	msg->lookup.card = htonl(__le32_to_cpu(set->meta->card));
 	msg->lookup.array_card = htonl(__le32_to_cpu(set->meta->array_card));
 
@@ -1396,7 +1397,8 @@ static int do_read_all(ldms_t x, ldms_set_t s, ldms_update_cb_t cb, void *arg)
 	struct ldms_context *ctxt;
 	int rc;
 	uint32_t len = __le32_to_cpu(s->meta->meta_sz)
-			+ __le32_to_cpu(s->meta->data_sz);
+			+ __le32_to_cpu(s->meta->data_sz)
+			+ __le32_to_cpu(s->meta->heap_sz);
 
 	ctxt = __ldms_alloc_ctxt(x, sizeof(*ctxt), LDMS_CONTEXT_UPDATE,
 				 s, cb, arg, 0, 0);
@@ -1459,7 +1461,7 @@ static int do_read_data(ldms_t x, ldms_set_t s, int idx_from, int idx_to,
 		rc = ENOMEM;
 		goto out;
 	}
-	data_sz = __le32_to_cpu(s->meta->data_sz);
+	data_sz = __le32_to_cpu(s->meta->data_sz) + __le32_to_cpu(s->meta->heap_sz);
 	doff = (uint8_t *)s->data_array - (uint8_t *)s->meta
 							+ idx_from * data_sz;
 	dlen = (idx_to - idx_from + 1) * data_sz;
@@ -2429,10 +2431,10 @@ static void handle_rendezvous_lookup(zap_ep_t zep, zap_event_t ev,
 
 	/* Create the set */
 	lset = __ldms_create_set(inst_name->name, schema_name->name,
-			       ntohl(lu->meta_len), ntohl(lu->data_len),
-			       ntohl(lu->card),
-			       ntohl(lu->array_card),
-			       LDMS_SET_F_REMOTE);
+				 ntohl(lu->meta_len), ntohl(lu->data_len),
+				 ntohl(lu->heap_len),
+				 ntohl(lu->card), ntohl(lu->array_card),
+				 LDMS_SET_F_REMOTE);
 	if (!lset) {
 		rc = errno;
 		goto callback;
@@ -3527,6 +3529,7 @@ int __ldms_xprt_push(ldms_set_t set, int push_flags)
 	uint32_t meta_meta_gn = __le32_to_cpu(set->meta->meta_gn);
 	uint32_t meta_meta_sz = __le32_to_cpu(set->meta->meta_sz);
 	uint32_t meta_data_sz = __le32_to_cpu(set->meta->data_sz);
+	uint32_t meta_heap_sz = __le32_to_cpu(set->meta->heap_sz);
 	struct rbn *rbn;
 	struct ldms_push_peer *p;
 
@@ -3549,10 +3552,10 @@ int __ldms_xprt_push(ldms_set_t set, int push_flags)
 
 		if (p->meta_gn != meta_meta_gn) {
 			p->meta_gn = meta_meta_gn;
-			len = meta_meta_sz + meta_data_sz;
+			len = meta_meta_sz + meta_data_sz + meta_heap_sz;
 			doff = 0;
 		} else {
-			len = meta_data_sz;
+			len = meta_data_sz + meta_heap_sz;
 			doff = (uint8_t *)set->data - (uint8_t *)set->meta;
 		}
 		size_t hdr_len = sizeof(struct ldms_reply_hdr)

@@ -1557,6 +1557,49 @@ extern int ldms_schema_metric_add_with_unit(ldms_schema_t s, const char *name,
 extern int ldms_schema_meta_add_with_unit(ldms_schema_t s, const char *name,
 					  const char *unit, enum ldms_value_type t);
 
+
+/*
+ * \brief Return the size of the set's heap in bytes.
+ *
+ * \param set The set handle
+ * \returns The set's heap size
+ */
+size_t ldms_set_heap_size_get(ldms_set_t set);
+
+/*
+ * \brief Return the heap bytes required
+ *
+ * Given an expected list size and entry type, return the number of
+ * heap bytes required. This is useful for providing hints to the
+ * ldms_schema_metric_list_add() function. Providing enough memory for
+ * the heap when the set is created will avoid unnecessary set memory
+ * relocations. A set relocation results in the destruction of the
+ * set, and associated ldms_xprt_lookup, and set recreation at the
+ * peer.
+ *
+ * \param type The type of entries added to the list
+ * \param item_count The expected list cardinatity
+ * \param array_count if \c type is an array, the expected size of each array
+ * \returns The heap size required for item_count entries of type
+ */
+size_t ldms_list_heap_size_get(enum ldms_value_type type, size_t item_count, size_t array_count);
+
+/**
+ * \brief Add a metric list to schema
+ *
+ * Adds a metric list to a metric set schema.
+ * The \c name of the metric must be unique within the metric set.
+ *
+ * \param s	The ldms_set_t handle.
+ * \param name	The name of the metric.
+ * \param units A 7-character unit string. May be \c NULL.
+ * \param heap_sz The number of heap bytes to reserve for the list
+ * \retval >=0  The metric index.
+ * \retval <0	Insufficient resources or duplicate name
+ */
+int ldms_schema_metric_list_add(ldms_schema_t s, const char *name,
+				const char *units, uint32_t heap_sz);
+
 /**
  * \brief Add an array metric/meta with the unit to schema
  *
@@ -1780,18 +1823,6 @@ int ldms_metric_is_array(ldms_set_t s, int i);
 ldms_mval_t ldms_metric_get(ldms_set_t s, int i);
 
 /**
- * \brief Get the address of the metric (array or scalar) in ldms set \c s.
- *
- * \note the data is little-endian. Use accessor functions if portability
- * is required.
- *
- * \param s The set handle.
- * \param i The metric ID.
- * \retval ptr The pointer to the array or scalar in the set.
- */
-ldms_mval_t ldms_metric_get_addr(ldms_set_t s, int i);
-
-/**
  * \brief Get the address of the array metric in ldms set \c s.
  *
  * \note ldms expects the elements in the array to be little-endian.
@@ -1881,6 +1912,22 @@ int32_t ldms_metric_array_get_s32(ldms_set_t s, int id, int idx);
 int64_t ldms_metric_array_get_s64(ldms_set_t s, int id, int idx);
 float ldms_metric_array_get_float(ldms_set_t s, int id, int idx);
 double ldms_metric_array_get_double(ldms_set_t s, int id, int idx);
+
+/**
+ * \brief Append a new value to a list
+ *
+ * Append a new value entry to a list metric.
+ *
+ * \param s	The set handle
+ * \param i	The metric index
+ * \param typ	The value type.
+ * \param count	The element count if the type is an array.
+ */
+ldms_mval_t ldms_list_append(ldms_set_t s, ldms_mval_t l, enum ldms_value_type typ, size_t count);
+ldms_mval_t ldms_list_first(ldms_set_t s, ldms_mval_t l, enum ldms_value_type *typ, size_t *count);
+ldms_mval_t ldms_list_next(ldms_set_t s, ldms_mval_t v, enum ldms_value_type *typ, size_t *count);
+size_t ldms_list_len(ldms_set_t s, ldms_mval_t l);
+int ldms_list_del(ldms_set_t s, int i, ldms_mval_t v);
 /** \} */
 
 /**

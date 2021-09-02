@@ -213,6 +213,7 @@ struct ldms_rendezvous_lookup_param {
 	uint32_t more;
 	uint32_t meta_len;
 	uint32_t data_len;
+	uint32_t heap_len;
 	uint32_t card; /* card of dict */
 	uint32_t schema_len;
 	uint32_t array_card; /* card of array */
