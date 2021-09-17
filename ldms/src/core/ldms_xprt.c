@@ -2070,6 +2070,9 @@ void __ldms_passive_connect_cb(ldms_t x, ldms_xprt_event_t e, void *cb_arg)
 	case LDMS_XPRT_EVENT_RECV:
 		/* Do nothing */
 		break;
+	case LDMS_XPRT_EVENT_SEND_COMPLETE:
+		/* Do nothing */
+		break;
 	default:
 		x->log("__ldms_passive_connect_cb: unexpected ldms_xprt event value %d\n",
 			(int) e->type);
@@ -2183,6 +2186,7 @@ static void __handle_update_data(ldms_t x, struct ldms_context *ctxt,
 	int n;
 	struct ldms_data_hdr *data, *prev_data;
 	int flags = 0, upd_curr_idx;
+	void *base;
 
 	assert(x == ctxt->x);
 	assert(ctxt->update.cb);
@@ -2222,6 +2226,10 @@ static void __handle_update_data(ldms_t x, struct ldms_context *ctxt,
 			flags = 0;
 		} else {
 			flags = LDMS_UPD_F_MORE;
+		}
+		if (set->meta->heap_sz) {
+			base = ((void*)set->data) + set->data->size - set->meta->heap_sz;
+			set->heap = ldms_heap_get(&set->heap_inst, &set->data->heap, base);
 		}
 		ctxt->update.cb(x, set, flags, ctxt->update.cb_arg);
 		prev_data = data;
@@ -2456,10 +2464,9 @@ static void handle_rendezvous_lookup(zap_ep_t zep, zap_event_t ev,
 
 	/* Create the set */
 	lset = __ldms_create_set(inst_name->name, schema_name->name,
-			       ntohl(lu->meta_len), ntohl(lu->data_len),
-			       ntohl(lu->card),
-			       ntohl(lu->array_card),
-			       LDMS_SET_F_REMOTE);
+				 ntohl(lu->meta_len), ntohl(lu->data_len),
+				 ntohl(lu->card), ntohl(lu->array_card),
+				 LDMS_SET_F_REMOTE);
 	if (!lset) {
 		rc = errno;
 		goto callback;
@@ -2807,9 +2814,13 @@ static void ldms_zap_cb(zap_ep_t zep, zap_event_t ev)
 		ldms_xprt_put(x);
 		break;
 	case ZAP_EVENT_SEND_COMPLETE:
-		event.type = LDMS_XPRT_EVENT_SEND_COMPLETE;
-		if (x->event_cb)
-			x->event_cb(x, &event, x->event_cb_arg);
+		if (!(x->auth_flag & LDMS_XPRT_AUTH_APPROVED)) {
+			/* Ignore */
+		} else {
+			event.type = LDMS_XPRT_EVENT_SEND_COMPLETE;
+			if (x->event_cb)
+				x->event_cb(x, &event, x->event_cb_arg);
+		}
 		break;
 	default:
 		x->log("ldms_zap_cb: unexpected zap event value %d from network\n",
@@ -3549,7 +3560,7 @@ int __ldms_xprt_push(ldms_set_t set, int push_flags)
 	struct ldms_reply *reply;
 	uint32_t meta_meta_gn = __le32_to_cpu(set->meta->meta_gn);
 	uint32_t meta_meta_sz = __le32_to_cpu(set->meta->meta_sz);
-	uint32_t meta_data_sz = __le32_to_cpu(set->meta->data_sz);
+	uint32_t meta_data_heap_sz = __le32_to_cpu(set->meta->data_sz);
 	struct rbn *rbn;
 	struct ldms_push_peer *p;
 
@@ -3572,10 +3583,10 @@ int __ldms_xprt_push(ldms_set_t set, int push_flags)
 
 		if (p->meta_gn != meta_meta_gn) {
 			p->meta_gn = meta_meta_gn;
-			len = meta_meta_sz + meta_data_sz;
+			len = meta_meta_sz + meta_data_heap_sz;
 			doff = 0;
 		} else {
-			len = meta_data_sz;
+			len = meta_data_heap_sz;
 			doff = (uint8_t *)set->data - (uint8_t *)set->meta;
 		}
 		size_t hdr_len = sizeof(struct ldms_reply_hdr)
@@ -3669,6 +3680,9 @@ static void sync_connect_cb(ldms_t x, ldms_xprt_event_t e, void *cb_arg)
 		break;
 	case LDMS_XPRT_EVENT_RECV:
 		break;
+	case LDMS_XPRT_EVENT_SEND_COMPLETE:
+		/* Don't post */
+		return;
 	default:
 		x->log("sync_connect_cb: unexpected ldms_xprt event value %d\n",
 			(int) e->type);

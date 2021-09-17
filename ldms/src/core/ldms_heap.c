@@ -1,8 +1,8 @@
 /* -*- c-basic-offset: 8 -*-
- * Copyright (c) 2013-2016,2018-2019 National Technology & Engineering Solutionsb
+ * Copyright (c) 2021 National Technology & Engineering Solutionsb
  * of Sandia, LLC (NTESS). Under the terms of Contract DE-NA0003525 with
  * NTESS, the U.S. Government retains certain rights in this software.
- * Copyright (c) 2013-2016,2018-2019 Open Grid Computing, Inc. All rights reserved.
+ * Copyright (c) 2021 Open Grid Computing, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -60,38 +60,38 @@
 #include <time.h>
 #include <errno.h>
 #include <pthread.h>
-#include "mmalloc.h"
-#include "../coll/rbt.h"
-#include "ovis-test/test.h"
+#include <assert.h>
+#include "ldms_heap.h"
+#include "rrbt.h"
 
-static int mm_is_disable_mm_free = 0;
+#define LDMS_HEAP_SIGNATURE "BOHEAP0"
 
-struct mm_prefix {
-	struct rbn addr_node;
-	struct rbn size_node;
-	size_t count;
-	struct mm_prefix *pfx;
+RRBN_DEF(addr, sizeof(uint64_t));
+RRBN_DEF(size, sizeof(uint64_t));
+struct mm_free {
+	struct rrbn_addr addr_node;
+	struct rrbn_size size_node;
 };
 
-typedef struct mm_region {
-	size_t grain;		/* minimum allocation size and alignment */
-	size_t grain_bits;
-	size_t size;
-	void *start;
-	pthread_mutex_t lock;
-	struct rbt size_tree;
-	struct rbt addr_tree;
-} *mm_region_t;
+struct mm_alloc {
+	uint32_t count;
+};
 
-static int compare_count(void *node_key, const void *val_key)
+static int compare_size(void *node_key, const void *val_key)
 {
-	return (int)(*(size_t *)node_key) - (*(size_t *)val_key);
+	size_t a = *(size_t *)node_key;
+	size_t b = *(uint8_t *)val_key;
+	if (a > b)
+		return 1;
+	if (a < b)
+		return -1;
+	return 0;
 }
 
 static int compare_addr(void *node_key, const void *val_key)
 {
-	char *a = *(char **)node_key;
-	char *b = *(char **)val_key;
+	uint8_t *a = *(uint8_t **)node_key;
+	uint8_t *b = *(uint8_t **)val_key;
 	if (a > b)
 		return 1;
 	if (a < b)
@@ -102,16 +102,52 @@ static int compare_addr(void *node_key, const void *val_key)
 /* NB: only works for power of two r */
 #define MMR_ROUNDUP(s,r)	((s + (r - 1)) & ~(r - 1))
 
-static mm_region_t mmr;
-
-void mm_get_info(struct mm_info *mmi)
+static int heap_stat(struct rrbn *rbn, void *fn_data, int level)
 {
-	mmi->grain = mmr->grain;
-	mmi->grain_bits = mmr->grain_bits;
-	mmi->size = mmr->size;
-	mmi->start = mmr->start;
+	ldms_heap_info_t info = fn_data;
+	struct mm_free *mm =
+		container_of(rbn, struct mm_free, addr_node);
+	info->free_chunks++;
+	info->free_bytes += mm->size_node.key_u64[0];
+	if (mm->size_node.key_u64[0] < info->smallest)
+		info->smallest = mm->size_node.key_u64[0];
+	if (mm->size_node.key_u64[0] > info->largest)
+		info->largest = mm->size_node.key_u64[0];
+	return 0;
 }
 
+uint64_t ldms_heap_off(ldms_heap_t h, void *p)
+{
+	if (!p)
+		return 0;
+	return (uint64_t)p - (uint64_t)h->base;
+}
+
+void *ldms_heap_ptr(ldms_heap_t h, uint64_t off)
+{
+	if (!off)
+		return NULL;
+	return (void *)((uint64_t)h->base + off);
+}
+
+void ldms_heap_get_info(ldms_heap_t heap, ldms_heap_info_t info)
+{
+	memset(info, 0, sizeof(*info));
+
+	pthread_mutex_lock(&heap->lock);
+
+	info->grain = heap->data->grain;
+	info->grain_bits = heap->data->grain_bits;
+	info->size = heap->data->size;
+	info->start = heap->data;
+
+	info->smallest = heap->data->size + 1;
+	rrbt_traverse(heap->addr_tree, heap_stat, info);
+
+	pthread_mutex_unlock(&heap->lock);
+}
+
+__attribute__((unused))
 static void get_pow2(size_t n, size_t *pow2, size_t *bits)
 {
 	size_t _pow2;
@@ -121,251 +157,188 @@ static void get_pow2(size_t n, size_t *pow2, size_t *bits)
 	*bits = _bits;
 }
 
-int mm_init(size_t size, size_t grain)
+void ldms_heap_init(struct ldms_heap *heap, void *base, size_t size, size_t grain)
 {
-	mmr = calloc(1, sizeof (*mmr));
-	if (!mmr)
-		return ENOMEM;
-	pthread_mutex_init(&mmr->lock, NULL);
-	size = MMR_ROUNDUP(size, 4096);
-	mmr->start = mmap(NULL, size, PROT_READ | PROT_WRITE,
-			  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-	if (MAP_FAILED == mmr->start)
-		goto out;
+	uint64_t count;
+	struct ldms_heap_base *hbase = base;
 
-#ifdef DEBUG
-	memset(mmr->start, 0XAA, size);
-#endif
+	if (size == 0) {
+		heap->size = 0;
+		return;
+	}
+	size = MMR_ROUNDUP(size, LDMS_HEAP_MIN_SIZE);
 
-	get_pow2(grain, &mmr->grain, &mmr->grain_bits);
-	mmr->size = size;
+	for (heap->grain = 1, heap->grain_bits = 0;
+	     heap->grain < grain;
+	     heap->grain <<= 1, heap->grain_bits++);
+
+	heap->size = size;
+	heap->gn = 0;
 
 	/* Inialize the size and address r-b trees */
-	rbt_init(&mmr->size_tree, compare_count);
-	rbt_init(&mmr->addr_tree, compare_addr);
+	rrbt_init(&heap->size_tree);
+	rrbt_init(&heap->addr_tree);
+
+	/* Sign the heap */
+	strcpy(hbase->signature, LDMS_HEAP_SIGNATURE);
 
 	/* Initialize the prefix */
-	struct mm_prefix *pfx = mmr->start;
-	pfx->count = size / mmr->grain;
-	pfx->pfx = pfx;
-	rbn_init(&pfx->size_node, &pfx->count);
-	rbn_init(&pfx->addr_node, &pfx->pfx);
+	struct mm_free *pfx = (typeof(pfx))hbase->start;
+	assert(((uint64_t)pfx & 7) == 0);
 
 	/* Insert the chunk into the r-b trees */
-	rbt_ins(&mmr->size_tree, &pfx->size_node);
-	rbt_ins(&mmr->addr_tree, &pfx->addr_node);
+	struct rrbt_instance inst;
+	rrbt_t tree = rrbt_get(&inst, &heap->size_tree.root, base, compare_size);
+	count = size / heap->grain;
+	rrbn_init(RRBN(pfx->size_node), &count, sizeof(count));
+	rrbt_ins(tree, RRBN(pfx->size_node));
 
-	const char *tmp = getenv("MMALLOC_DISABLE_MM_FREE");
-	if (tmp)
-		mm_is_disable_mm_free = atoi(tmp);
-
-	return 0;
- out:
-	free(mmr);
-	return errno;
+	tree = rrbt_get(&inst, &heap->addr_tree.root, base, compare_addr);
+	count = (uint64_t)pfx - (uint64_t)base;
+	rrbn_init(RRBN(pfx->addr_node), &count, sizeof(uint64_t));
+	rrbt_ins(tree, RRBN(pfx->addr_node));
 }
 
-void *mm_alloc(size_t size)
+ldms_heap_t ldms_heap_get(ldms_heap_t h, struct ldms_heap *heap, void *base)
 {
-	struct mm_prefix *p, *n;
-	struct rbn *rbn;
+	h->data = heap;
+	h->base = base;
+	h->size_tree = rrbt_get(&h->size_inst, &heap->size_tree.root, base, compare_size);
+	h->addr_tree = rrbt_get(&h->addr_inst, &heap->addr_tree.root, base, compare_addr);
+	pthread_mutex_init(&h->lock, NULL);
+	if (strncmp(h->base->signature, LDMS_HEAP_SIGNATURE, sizeof(h->base->signature))) {
+		assert(0 == "heap signature mismatch");
+		return NULL;
+	}
+	return h;
+}
+
+size_t ldms_heap_alloc_size(size_t grain_sz, size_t data_sz)
+{
+	/* Contains the size prefix needed to free the memory */
+	data_sz += sizeof(struct mm_alloc);
+	/* The memory chunk must hold mm_free */
+	if (data_sz < sizeof(struct mm_free))
+		data_sz = sizeof(struct mm_free);
+	return MMR_ROUNDUP(data_sz, grain_sz);
+}
+
+void *ldms_heap_alloc(ldms_heap_t heap, size_t size)
+{
+	struct mm_free *p, *n;
+	struct mm_alloc *a;
+	struct rrbn *rbn;
 	uint64_t count;
 	uint64_t remainder;
 
-	size += sizeof(*p);
-	size = MMR_ROUNDUP(size, mmr->grain);
-	count = size >> mmr->grain_bits;
+	size = ldms_heap_alloc_size(heap->data->grain, size);
+	count = size >> heap->data->grain_bits;
 
-	pthread_mutex_lock(&mmr->lock);
-	rbn = rbt_find_lub(&mmr->size_tree, &count);
+	pthread_mutex_lock(&heap->lock);
+	rbn = rrbt_find_lub(heap->size_tree, &count);
 	if (!rbn) {
-		pthread_mutex_unlock(&mmr->lock);
+		pthread_mutex_unlock(&heap->lock);
 		return NULL;
 	}
 
-	p = container_of(rbn, struct mm_prefix, size_node);
+	p = container_of(rbn, struct mm_free, size_node);
 
 	/* Remove the node from the size and address trees */
-	rbt_del(&mmr->size_tree, &p->size_node);
-	rbt_del(&mmr->addr_tree, &p->addr_node);
+	rrbt_del(heap->size_tree, RRBN(p->size_node));
+	rrbt_del(heap->addr_tree, RRBN(p->addr_node));
 
 	/* Create a new node from the remainder of p if any */
-	remainder = p->count - count;
+	remainder = p->size_node.key_u64[0] - count;
 	if (remainder) {
-		n = (struct mm_prefix *)
-			((unsigned char *)p + (count << mmr->grain_bits));
-		n->count = remainder;
-		n->pfx = n;
-		rbn_init(&n->size_node, &n->count);
-		rbn_init(&n->addr_node, &n->pfx);
+		n = (struct mm_free *)
+			((unsigned char *)p + (count << heap->data->grain_bits));
+		uint64_t offset = ldms_heap_off(heap, n);
+		rrbn_init(RRBN(n->size_node), &remainder, sizeof(remainder));
+		rrbn_init(RRBN(n->addr_node), &offset, sizeof(offset));
 
-		rbt_ins(&mmr->size_tree, &n->size_node);
-		rbt_ins(&mmr->addr_tree, &n->addr_node);
+		rrbt_ins(heap->size_tree, RRBN(n->size_node));
+		rrbt_ins(heap->addr_tree, RRBN(n->addr_node));
 	}
-	p->count = count;
-	p->pfx = p;
-	pthread_mutex_unlock(&mmr->lock);
-	return ++p;
+	a = (struct mm_alloc *)p;
+	a->count = count;
+	heap->data->gn++;
+	pthread_mutex_unlock(&heap->lock);
+	return ++a;
 }
 
-void mm_free(void *d)
+void ldms_heap_free(ldms_heap_t heap, void *d)
 {
-	if (mm_is_disable_mm_free)
-		return;
-	if (!d)
-		return;
+	uint32_t count;
+	struct mm_alloc *a = d;
+	struct mm_free *p;
+	struct mm_free *q;
+	struct rrbn *rbn;
+	uint64_t offset;
 
-	struct mm_prefix *p = d;
-	struct mm_prefix *q, *r;
-	struct rbn *rbn;
+	a--;
+	count = a->count;
+	p = (void *)a;
+	offset = ldms_heap_off(heap, p);
+	rrbn_init(RRBN(p->size_node), &count, sizeof(count));
+	rrbn_init(RRBN(p->addr_node), &offset, sizeof(offset));
 
-	p --;
-
-	pthread_mutex_lock(&mmr->lock);
 	/* See if we can coalesce with our lesser sibling */
-	rbn = rbt_find_glb(&mmr->addr_tree, &p->pfx);
+	rbn = rrbt_find_glb(heap->addr_tree, &offset);
 	if (rbn) {
-		q = container_of(rbn, struct mm_prefix, addr_node);
+		q = container_of(rbn, struct mm_free, addr_node);
 
-		/* See if q is contiguous with us */
-		r = (struct mm_prefix *)
-			((unsigned char *)q + (q->count << mmr->grain_bits));
-		if (r == p) {
-			/* Remove the sibling from the tree and coelesce */
-			rbt_del(&mmr->size_tree, &q->size_node);
-			rbt_del(&mmr->addr_tree, &q->addr_node);
-
-			q->count += p->count;
+		/* See if q is contiguous with p */
+		offset = q->addr_node.key_u64[0] + (q->size_node.key_u64[0] << heap->data->grain_bits);
+		if (offset == p->addr_node.key_u64[0]) {
+			/* Remove the left sibling from the tree and coelesce */
+			rrbt_del(heap->size_tree, RRBN(q->size_node));
+			rrbt_del(heap->addr_tree, RRBN(q->addr_node));
+			q->size_node.key_u64[0] += p->size_node.key_u64[0];
 			p = q;
 		}
 	}
-
 	/* See if we can coalesce with our greater sibling */
-	rbn = rbt_find_lub(&mmr->addr_tree, &p->pfx);
+	rbn = rrbt_find_lub(heap->addr_tree, &offset);
 	if (rbn) {
-		q = container_of(rbn, struct mm_prefix, addr_node);
+		q = container_of(rbn, struct mm_free, addr_node);
 
-		/* See if q is contiguous with us */
-		r = (struct mm_prefix *)
-			((unsigned char *)p + (p->count << mmr->grain_bits));
-		if (r == q) {
-			/* Remove the sibling from the tree and coelesce */
-			rbt_del(&mmr->size_tree, &q->size_node);
-			rbt_del(&mmr->addr_tree, &q->addr_node);
+		offset = p->addr_node.key_u64[0] + (p->size_node.key_u64[0] << heap->data->grain_bits);
+		if (offset == q->addr_node.key_u64[0]) {
+			/* Remove the right sibling from the tree and coelesce */
+			rrbt_del(heap->size_tree, RRBN(q->size_node));
+			rrbt_del(heap->addr_tree, RRBN(q->addr_node));
 
-			p->count += q->count;
+			p->size_node.key_u64[0] += q->size_node.key_u64[0];
 		}
 	}
 	/* Fix-up our nodes' key in case we coelesced */
-	p->pfx = p;
-	rbn_init(&p->size_node, &p->count);
-	rbn_init(&p->addr_node, &p->pfx);
-
-#ifdef DEBUG
-	memset(p+1, 0xFF, (p->count << mmr->grain_bits) - sizeof(*p));
-#endif
+	offset = ldms_heap_off(heap, p);
+	// rrbn_init(RRBN(p->size_node), &p->count, sizeof(p->count));
+	rrbn_init(RRBN(p->addr_node), &offset, sizeof(offset));
 
 	/* Put 'p' back in the trees */
-	rbt_ins(&mmr->size_tree, &p->size_node);
-	rbt_ins(&mmr->addr_tree, &p->addr_node);
-	pthread_mutex_unlock(&mmr->lock);
+	rrbt_ins(heap->size_tree, RRBN(p->size_node));
+	rrbt_ins(heap->addr_tree, RRBN(p->addr_node));
+
+	/* Modify generation nubmer */
+	heap->data->gn++;
+
+	pthread_mutex_unlock(&heap->lock);
 }
 
-void *mm_realloc(void *ptr, size_t newsize)
+size_t ldms_heap_size(size_t size)
 {
-	struct mm_prefix *p = ptr;
-	struct mm_prefix *q, *r;
-	struct rbn *rbn;
-	void *newbuf = NULL;
-	size_t newcount, remainder;
-
-	newsize = MMR_ROUNDUP(newsize, mmr->grain);
-	newcount = newsize >> mmr->grain_bits;
-	p --;
-
-	pthread_mutex_lock(&mmr->lock);
-	/* See if we can coalesce with our greater sibling */
-	rbn = rbt_find_lub(&mmr->addr_tree, &p->pfx);
-	if (rbn) {
-		q = container_of(rbn, struct mm_prefix, addr_node);
-
-		/* See if q is contiguous with us */
-		r = (struct mm_prefix *)
-			((unsigned char *)p + (p->count << mmr->grain_bits));
-		if (r == q) {
-			if (p->count + q->count >= newcount) {
-				/* Remove the sibling from the tree and coelesce */
-				rbt_del(&mmr->size_tree, &q->size_node);
-				rbt_del(&mmr->addr_tree, &q->addr_node);
-
-				remainder = p->count + q->count - newcount;
-				if (remainder) {
-					/* Put the remainder back into the tree */
-					r = (struct mm_prefix *)
-						((unsigned char *)p + (newcount << mmr->grain_bits));
-					r->count = remainder;
-					r->pfx = r;
-					rbn_init(&r->size_node, &r->count);
-					rbn_init(&r->addr_node, &r->pfx);
-
-					rbt_ins(&mmr->size_tree, &r->size_node);
-					rbt_ins(&mmr->addr_tree, &r->addr_node);
-				}
-				p->count = newcount;
-				goto out;
-			}
-		}
-	}
-
-	/* Allocate a new buffer and copy ptr data to it */
-	newbuf = mm_alloc(newsize);
-	memcpy(newbuf, ptr, (p->count << mmr->grain_bits));
-	p = newbuf;
-	p--;
-
- out:
-	pthread_mutex_unlock(&mmr->lock);
-	if (newbuf)
-		mm_free(ptr);
-	return ++p;
+	return MMR_ROUNDUP(size, LDMS_HEAP_MIN_SIZE);
 }
 
-static int heap_stat(struct rbn *rbn, void *fn_data, int level)
-{
-	struct mm_stat *s = fn_data;
-	struct mm_prefix *mm =
-		container_of(rbn, struct mm_prefix, addr_node);
-	s->chunks++;
-	s->bytes += mm->count;
-	if (mm->count < s->smallest)
-		s->smallest = mm->count;
-	if (mm->count > s->largest)
-		s->largest = mm->count;
-	return 0;
-}
 
-void mm_stats(struct mm_stat *s)
-{
-	if (!s)
-		return;
-	memset(s,0,sizeof(*s));
-	if (!mmr)
-		return;
-	pthread_mutex_lock(&mmr->lock);
-	s->size = mmr->size;
-	s->grain = mmr->grain;
-	s->smallest = s->size + 1;
-	rbt_traverse(&mmr->addr_tree, heap_stat, s);
-	pthread_mutex_unlock(&mmr->lock);
-}
-
-#ifdef MMR_TEST
+#ifdef LDMS_HEAP_TEST
 int node_count;
-int heap_print(struct rbn *rbn, void *fn_data, int level)
+int heap_print(struct rrbn *rbn, void *fn_data, int level)
 {
-	struct mm_prefix *mm =
-		container_of(rbn, struct mm_prefix, addr_node);
-	printf("#%*p[%zu]\n", 80 - (level * 20), mm, mm->count);
+	struct mm_free *mm =
+		container_of(rbn, struct mm_free, addr_node);
+	printf("#%*p[%zu]\n", 80 - (level * 20), mm, mm->size_node.key_u64[0]);
 	node_count++;
 	return 0;
 }
@@ -398,7 +371,7 @@ int main(int argc, char *argv[])
 	 * +---------~~------~~--------~~-------+
 	 */
 	node_count = 0;
-	rbt_traverse(&mmr->addr_tree, heap_print, NULL);
+	rrbt_traverse(&mmr->addr_tree, heap_print, NULL);
 	TEST_ASSERT((node_count == 1),
 		    "There is only a single node in the heap after mm_init.\n");
 	mm_stats(&s);
@@ -425,7 +398,7 @@ int main(int argc, char *argv[])
 	 * +---++---+|---++---++---++---++--~~~-+
 	 */
 	node_count = 0;
-	rbt_traverse(&mmr->addr_tree, heap_print, NULL);
+	rrbt_traverse(&mmr->addr_tree, heap_print, NULL);
 	TEST_ASSERT((node_count == 1),
 		    "There is only a single node in the heap "
 		    "after six allocations.\n");
@@ -444,7 +417,7 @@ int main(int argc, char *argv[])
 	 * +---++---+|---++---++---++---++--~~~-+
 	 */
 	node_count = 0;
-	rbt_traverse(&mmr->addr_tree, heap_print, NULL);
+	rrbt_traverse(&mmr->addr_tree, heap_print, NULL);
 	TEST_ASSERT((node_count == 4),
 		    "There are four nodes in the heap "
 		    "after three discontiguous frees.\n");
@@ -460,7 +433,7 @@ int main(int argc, char *argv[])
 	 * +-------------++---++---++---++--~~--+
 	 */
 	node_count = 0;
-	rbt_traverse(&mmr->addr_tree, heap_print, NULL);
+	rrbt_traverse(&mmr->addr_tree, heap_print, NULL);
 	TEST_ASSERT((node_count == 3),
 		    "There are three nodes in the heap "
 		    "after a contiguous free coelesces a block.\n");
@@ -477,7 +450,7 @@ int main(int argc, char *argv[])
 	 * +-------------++---++---~~---~~--~~--+
 	 */
 	node_count = 0;
-	rbt_traverse(&mmr->addr_tree, heap_print, NULL);
+	rrbt_traverse(&mmr->addr_tree, heap_print, NULL);
 	TEST_ASSERT((node_count == 2),
 		    "There are two nodes in the heap "
 		    "after a contiguous free coelesces another block.\n");
@@ -494,7 +467,7 @@ int main(int argc, char *argv[])
 	 * +---------~~------~~--------~~-------+
 	 */
 	node_count = 0;
-	rbt_traverse(&mmr->addr_tree, heap_print, NULL);
+	rrbt_traverse(&mmr->addr_tree, heap_print, NULL);
 	TEST_ASSERT((node_count == 1),
 		    "There is one node in the heap "
 		    "after a contiguous free coelesces the "

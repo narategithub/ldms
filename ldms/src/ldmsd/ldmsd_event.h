@@ -1,8 +1,8 @@
 /* -*- c-basic-offset: 8 -*-
- * Copyright (c) 2016-2018 National Technology & Engineering Solutions
+ * Copyright (c) 2021 National Technology & Engineering Solutions
  * of Sandia, LLC (NTESS). Under the terms of Contract DE-NA0003525 with
  * NTESS, the U.S. Government retains certain rights in this software.
- * Copyright (c) 2016-2018 Open Grid Computing, Inc. All rights reserved.
+ * Copyright (c) 2021 Open Grid Computing, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -46,97 +46,31 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-/**
- * \file tsampler.c
- */
+#ifndef __LDMSD_EVENT_H__
+#define __LDMSD_EVENT_H__
+#include "ovis_json/ovis_json.h"
+#include "ovis_ev/ev.h"
+#include "ldmsd_stream.h"
+#include "ldmsd_request.h"
+#include "ldmsd.h"
 
-#include <pthread.h>
-#include <errno.h>
-#include <stdlib.h>
-#include "tsampler.h"
-#include "ovis_event/ovis_event.h"
 
-static pthread_t thr;
-static ovis_scheduler_t evm;
-static int ready;
+/* Worker */
+extern ev_worker_t logger_w;
 
-static
-void *thread_proc(void *arg)
-{
-	ovis_scheduler_loop(evm, 0);
-	return NULL;
-}
+/* Event Types and data */
+/* LDMSD log */
+extern ev_type_t log_type;
 
-static
-void tsampler_cb(ovis_event_t ev)
-{
-	tsampler_timer_t x = ev->param.ctxt;
-	ldms_mval_t mv = ldms_metric_get(x->set, x->tid);
+struct log_data {
+	uint8_t is_rotate;
+	enum ldmsd_loglevel level;
+	char *msg;
 	struct timeval tv;
-	gettimeofday(&tv, NULL);
-	if (x->tid >= 0) {
-		struct timeval *_tv = (void*)&mv->a_u64[x->idx * 2];
-		*_tv = tv;
-	}
-	x->time = tv;
-	x->cb(x);
-	x->idx++;
-	if (x->idx == x->n)
-		x->idx = 0;
-}
+	struct tm tm;
+};
 
-int tsampler_timer_add(tsampler_timer_t x)
-{
-	int rc = 0;
-	union ovis_event_time_param_u tp;
-	if (!ready)
-		return EFAULT;
-	if (x->interval.tv_sec < 0)
-		return EINVAL;
-	if (x->interval.tv_usec < 0 || 999999 < x->interval.tv_usec)
-		return EINVAL;
-	if (!x->cb)
-		return EINVAL;
-	if (x->mid < 0)
-		return EINVAL;
-	if (!x->set)
-		return EINVAL;
-	x->n = ldms_metric_array_get_len(x->set, x->mid);
-	if (!x->n) {
-		return EINVAL;
-	}
-	tp.periodic.period_us = x->interval.tv_sec * 1000000 +
-				x->interval.tv_usec;
-	tp.periodic.phase_us = 0;
-	x->__internal.ev = ovis_event_periodic_new(tsampler_cb, x, &tp.periodic);
-	if (!x->__internal.ev) {
-		return errno;
-	}
-	x->idx = 0;
-	rc = ovis_scheduler_event_add(evm, x->__internal.ev);
-	if (rc) {
-		ovis_event_free(x->__internal.ev);
-	}
-	return rc;
-}
+int ldmsd_ev_init(void);
+int ldmsd_worker_init(void);
 
-void tsampler_timer_remove(tsampler_timer_t x)
-{
-	if (x->__internal.ev) {
-		ovis_scheduler_event_del(evm, x->__internal.ev);
-		ovis_event_free(x->__internal.ev);
-		x->__internal.ev = NULL;
-	}
-}
-
-static __attribute__((constructor))
-void __init()
-{
-	int rc;
-	ready = 0;
-	evm = ovis_scheduler_new();
-	rc = pthread_create(&thr, NULL, thread_proc, NULL);
-	if (rc)
-		return;
-	ready = 1;
-}
+#endif /* __LDMSD_EVENT_H__ */

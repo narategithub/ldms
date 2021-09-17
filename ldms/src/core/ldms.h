@@ -303,6 +303,7 @@ typedef void (*ldms_lookup_cb_t)(ldms_t t, enum ldms_lookup_status status,
 #define LDMS_SET_F_LOCAL	0x0004
 #define LDMS_SET_F_REMOTE	0x0008
 #define LDMS_SET_F_PUSH_CHANGE	0x0010
+#define LDMS_SET_F_DATA_COPY	0x0020 /* set array data copy on transaction begin */
 #define LDMS_SET_F_PUBLISHED	0x100000 /* Set is in the set tree. */
 #define LDMS_SET_ID_DATA	0x1000000
 
@@ -1289,7 +1290,7 @@ void ldms_set_default_authz(uid_t *uid, gid_t *gid, mode_t *perm, int set_flags)
 extern uint32_t ldms_set_meta_sz_get(ldms_set_t s);
 
 /**
- * \brief Get the size in bytes of the set's data
+ * \brief Get the size in bytes of the set's data (including heap)
  * \param s	The ldms_set_t handle.
  * \return The size of the set's data in bytes.
  */
@@ -1336,6 +1337,37 @@ uint64_t ldms_set_meta_gn_get(ldms_set_t s);
  * \returns	The 64bit data generation number.
  */
 uint64_t ldms_set_data_gn_get(ldms_set_t s);
+
+/**
+ * \brief Get the heap generation number.
+ */
+uint64_t ldms_set_heap_gn_get(ldms_set_t s);
+
+/**
+ * \brief Tell LDMS to copy previous data in the set array on transaction begin.
+ *
+ * When \c ldms_transaction_begin() is called, the set data points to the next
+ * data slot in the set array and the metric modification by the application
+ * will be applied to the new data slow. By default, the new data slot is left
+ * as-is is. This presumes that the \c sample() function will update all list
+ * entry data at each invocation.
+ *
+ * By calling \c ldms_set_data_copy_set(s, 1), LDMS will copy the data from the
+ * previous slot into the new slot at \c ldms_transaction_begin().
+ *
+ * For the the heap data (in which ldms_list and its elements reside),
+ * if the heap structure has changed (i.e. `ldms_list_append()` or
+ * `ldms_list_del()` was called), the heap section will be copied over to the
+ * new slot regardless of the data copy flag to preserve the heap structure.
+ * Note that in the case of data manipulation w/o heap structure changes (no
+ * calling to `ldms_list_append()` nor `ldms_list_del()`), the data won't be
+ * copied over if the copy flag is not set to on.
+ *
+ * \param s  The \c ldms_set_t handle.
+ * \param on_n_off \c 1 for turning data copy flag on, or \c 0 for turning it off.
+ */
+void ldms_set_data_copy_set(ldms_set_t s, int on_n_off);
+
 /** \} */
 
 /**
@@ -1557,6 +1589,41 @@ extern int ldms_schema_metric_add_with_unit(ldms_schema_t s, const char *name,
 					    const char *unit, enum ldms_value_type type);
 extern int ldms_schema_meta_add_with_unit(ldms_schema_t s, const char *name,
 					  const char *unit, enum ldms_value_type t);
+
+
+/**
+ * \brief Return the heap bytes required
+ *
+ * Given an expected list size and entry type, return the number of
+ * heap bytes required. This is useful for providing hints to the
+ * ldms_schema_metric_list_add() function. Providing enough memory for
+ * the heap when the set is created will avoid unnecessary set memory
+ * relocations. A set relocation results in the destruction of the
+ * set, and associated ldms_xprt_lookup, and set recreation at the
+ * peer.
+ *
+ * \param type The type of entries added to the list
+ * \param item_count The expected list cardinatity
+ * \param array_count if \c type is an array, the expected size of each array
+ * \returns The heap size required for item_count entries of type
+ */
+size_t ldms_list_heap_size_get(enum ldms_value_type type, size_t item_count, size_t array_count);
+
+/**
+ * \brief Add a metric list to schema
+ *
+ * Adds a metric list to a metric set schema.
+ * The \c name of the metric must be unique within the metric set.
+ *
+ * \param s	The ldms_set_t handle.
+ * \param name	The name of the metric.
+ * \param units A 7-character unit string. May be \c NULL.
+ * \param heap_sz The number of heap bytes to reserve for the list
+ * \retval >=0  The metric index.
+ * \retval <0	Insufficient resources or duplicate name
+ */
+int ldms_schema_metric_list_add(ldms_schema_t s, const char *name,
+				const char *units, uint32_t heap_sz);
 
 /**
  * \brief Add an array metric/meta with the unit to schema
@@ -1781,18 +1848,6 @@ int ldms_metric_is_array(ldms_set_t s, int i);
 ldms_mval_t ldms_metric_get(ldms_set_t s, int i);
 
 /**
- * \brief Get the address of the metric (array or scalar) in ldms set \c s.
- *
- * \note the data is little-endian. Use accessor functions if portability
- * is required.
- *
- * \param s The set handle.
- * \param i The metric ID.
- * \retval ptr The pointer to the array or scalar in the set.
- */
-ldms_mval_t ldms_metric_get_addr(ldms_set_t s, int i);
-
-/**
  * \brief Get the address of the array metric in ldms set \c s.
  *
  * \note ldms expects the elements in the array to be little-endian.
@@ -1882,6 +1937,35 @@ int32_t ldms_metric_array_get_s32(ldms_set_t s, int id, int idx);
 int64_t ldms_metric_array_get_s64(ldms_set_t s, int id, int idx);
 float ldms_metric_array_get_float(ldms_set_t s, int id, int idx);
 double ldms_metric_array_get_double(ldms_set_t s, int id, int idx);
+
+/**
+ * \brief Append a new value to a list
+ *
+ * Append a new value entry to a list metric.
+ *
+ * \param s	The set handle
+ * \param i	The metric index
+ * \param typ	The value type.
+ * \param count	The element count if the type is an array.
+ */
+ldms_mval_t ldms_list_append(ldms_set_t s, ldms_mval_t l, enum ldms_value_type typ, size_t count);
+ldms_mval_t ldms_list_first(ldms_set_t s, ldms_mval_t l, enum ldms_value_type *typ, size_t *count);
+ldms_mval_t ldms_list_next(ldms_set_t s, ldms_mval_t v, enum ldms_value_type *typ, size_t *count);
+size_t ldms_list_len(ldms_set_t s, ldms_mval_t l);
+
+/**
+ * \brief Remove \c v from the list \c list.
+ *
+ * The handle \c v is not valid after the call. If \c v is an \c LDMS_V_LIST,
+ * the members of \c v will be recursively deleted.
+ *
+ */
+int ldms_list_del(ldms_set_t s, ldms_mval_t lh, ldms_mval_t v);
+
+/**
+ * Purge all elements from the list \c lh.
+ */
+int ldms_list_purge(ldms_set_t s, ldms_mval_t lh);
 /** \} */
 
 /**

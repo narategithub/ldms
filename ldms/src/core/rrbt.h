@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2015 Open Grid Computing, Inc. All rights reserved.
+ * Copyright (c) 2019 Open Grid Computing, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -43,78 +43,111 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-#ifndef _RBT_T
-#define _RBT_T
+#ifndef _RRBT_T_
+#define _RRBT_T_
 
 #include <stddef.h>
+#include <inttypes.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /*
+ * This implements a relocatable red-black-tree. The entire tree can
+ * be copied without affecting internal consistency. All pointers are
+ * stored as offsets from a base address.
+ *
+ * A consistent copy can be performed by memcpy'ing the tree to a new
+ * address, and then updating the base address pointer in the rrbt
+ * structure to the destination base address.
+ *
  * Red/Black tree implementation. See
  * http://www.nist.gov/dads/HTML/redblack.html for a definition of
  * this algorithm.
  */
 
-#define RBN_RED      0
-#define RBN_BLACK    1
+#define RRBN_RED      0
+#define RRBN_BLACK    1
 
-/* Red/Black Node */
-struct rbn {
-	struct rbn       *left;
-	struct rbn       *right;
-	struct rbn       *parent;
-	int               color;
-	void             *key;
+/* Relocatable Red/Black Node */
+struct rrbn {
+	uint64_t color:1;
+	uint64_t left:31;	/* struct rrbn */
+	uint64_t right; 	/* struct rrbn */
+	uint64_t parent;	/* struct rrbn */
+	union {
+		uint8_t  key[0];
+		uint16_t  key_u16[0];
+		uint32_t  key_u32[0];
+		uint64_t  key_u64[0];
+	};
 };
+#define RRBN_DEF(_name_, _key_size_)			\
+	struct rrbn_ ## _name_ {			\
+		struct rrbn base;			\
+		union {					\
+			uint8_t  key[_key_size_];	\
+			uint16_t  key_u16[0];		\
+			uint32_t  key_u32[0];		\
+			uint64_t  key_u64[0];		\
+		};					\
+	}
 
-/* Sets key on n.  */
-void rbn_init(struct rbn *n, void *key);
+#define RRBN(_r_) &((_r_).base)
+
+void rrbn_init(struct rrbn *n, void *key, size_t key_len);
 
 /* Comparator callback provided for insert and search operations */
-typedef int (*rbn_comparator_t)(void *tree_key, const void *key);
+typedef int (*rrbn_comparator_t)(void *tree_key, const void *key);
 
 /* Processor for each node during traversal. */
-typedef int (*rbn_node_fn)(struct rbn *, void *, int);
+typedef int (*rrbn_node_fn)(struct rrbn *, void *, int);
 
-struct rbt {
-	struct rbn       *root;
-	rbn_comparator_t comparator;
-	long		 card;
+struct rrbt {
+	uint64_t root;		/* struct rbn * */
 };
 
-void rbt_init(struct rbt *t, rbn_comparator_t c);
-#define RBT_INITIALIZER(_c_) { .comparator = _c_ }
-void rbt_verify(struct rbt *t);
-int rbt_empty(struct rbt *t);
-long rbt_card(struct rbt *t);
-struct rbn *rbt_least_gt_or_eq(struct rbn *n);
-struct rbn *rbt_greatest_lt_or_eq(struct rbn *n);
-struct rbn *rbt_find_lub(struct rbt *rbt, const void *key);
-struct rbn *rbt_find_glb(struct rbt *rbt, const void *key);
-struct rbn *rbt_find(struct rbt *t, const void *k);
-struct rbn *rbt_min(struct rbt *t);
-struct rbn *rbt_max(struct rbt *t);
-struct rbn *rbn_succ(struct rbn *n);
-struct rbn *rbn_pred(struct rbn *n);
-void rbt_ins(struct rbt *t, struct rbn *n);
-void rbt_del(struct rbt *t, struct rbn *n);
-int rbt_traverse(struct rbt *t, rbn_node_fn f, void *fn_data);
-int rbt_is_leaf(struct rbn *n);
+typedef struct rrbt_instance {
+	rrbn_comparator_t comparator;
+	uint64_t *root;
+	uint8_t *base;
+} *rrbt_t;
+
+#define rrbt_ptr(_type_, _tree_, _off_) (_off_ ? ((_type_ *)(&_tree_->base[(_off_)])) : NULL)
+#define rrbn_ptr(_tree_, _off_) rrbt_ptr(struct rrbn, _tree_, _off_)
+#define rrbt_off(_tree_, _ptr_) (_ptr_ ? (((uint8_t *)_ptr_) - _tree_->base) : 0)
+
+void rrbt_init(struct rrbt *t);
+rrbt_t rrbt_get(struct rrbt_instance *inst, uint64_t *root, void *base, rrbn_comparator_t c);
+
+#define RRBT_INITIALIZER(_c_, _m_) { .comparator = _c_, .base = _m_ }
+
+int rrbt_empty(rrbt_t t);
+struct rrbn *rrbt_least_gt_or_eq(rrbt_t t, struct rrbn *n);
+struct rrbn *rrbt_greatest_lt_or_eq(rrbt_t t, struct rrbn *n);
+struct rrbn *rrbt_find_lub(rrbt_t rrbt, const void *key);
+struct rrbn *rrbt_find_glb(rrbt_t rrbt, const void *key);
+struct rrbn *rrbt_find(rrbt_t t, const void *k);
+struct rrbn *rrbt_min(rrbt_t t);
+struct rrbn *rrbt_max(rrbt_t t);
+struct rrbn *rrbn_succ(rrbt_t t, struct rrbn *n);
+struct rrbn *rrbn_pred(rrbt_t t, struct rrbn *n);
+void rrbt_ins(rrbt_t t, struct rrbn *n);
+void rrbt_del(rrbt_t t, struct rrbn *n);
+int rrbt_traverse(rrbt_t t, rrbn_node_fn f, void *fn_data);
+int rrbt_is_leaf(struct rrbn *n);
 #ifndef offsetof
 /* C standard since c89 */
 #define offsetof(type,member) ((size_t) &((type *)0)->member)
 #endif
-/* from linux kernel */
 #ifndef container_of
 #define container_of(ptr, type, member) ({ \
 	const __typeof__(((type *)0)->member ) *__mptr = (void *)(ptr); \
 	(type *)((char *)__mptr - offsetof(type,member));})
 #endif
-#define RBT_FOREACH(rbn, rbt) \
-	for ((rbn) = rbt_min((rbt)); (rbn); (rbn) = rbn_succ((rbn)))
+#define RRBT_FOREACH(rrbn, rrbt) \
+	for ((rrbn) = rrbt_min((rrbt)); (rrbn); (rrbn) = rrbn_succ((rrbn)))
 
 #ifdef __cplusplus
 }

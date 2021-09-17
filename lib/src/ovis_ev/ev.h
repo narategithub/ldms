@@ -254,6 +254,14 @@ int ev_dispatch(ev_worker_t w, ev_type_t t, ev_actor_t fn);
 int ev_posted(ev_t ev);
 
 /**
+ * \brief Returns 1 if the event is canceled
+ *
+ * \retval 1 Event is canceled
+ * \retval 0 Event is not canceled
+ */
+int ev_canceled(ev_t ev);
+
+/**
 * \brief Compare two timespec values
 *
 * Compares two timespace values *tsa and *tsb and returns:
@@ -278,5 +286,17 @@ int ev_time_cmp(struct timespec *tsa, const struct timespec *tsb);
  * \returns The difference in seconds
  */
 double ev_time_diff(struct timespec *tsa, const struct timespec *tsb);
+
+/**
+ * \brief Return the number of pending events on the worker
+ *
+ * The returned number does not include the event that is
+ * currently handled by the application.
+ *
+ * \param w Worker
+ *
+ * \return A non-negative number. 0 means no pending events.
+ */
+int ev_pending(ev_worker_t w);
 
 #endif
