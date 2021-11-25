@@ -255,8 +255,9 @@ enum ldms_value_type {
 	LDMS_V_LIST_ENTRY,
 	LDMS_V_RECORD_TYPE,
 	LDMS_V_RECORD_INST,
+	LDMS_V_RECORD_ARRAY,
 	LDMS_V_FIRST = LDMS_V_CHAR,
-	LDMS_V_LAST = LDMS_V_RECORD_INST
+	LDMS_V_LAST = LDMS_V_RECORD_ARRAY
 };
 
 #define LDMS_RECORD_FIELD_INST 255
@@ -294,6 +295,13 @@ typedef struct ldms_record_inst {
 	char rec_data[OVIS_FLEX_UNION]; /* data of the record */
 } *ldms_record_inst_t;
 
+typedef struct ldms_record_array {
+	int inst_sz;
+	int rec_type; /* reference to rec_type */
+	int array_len;
+	char data[OVIS_FLEX];
+} *ldms_record_array_t;
+
 /**
  * \brief Metric value union
  *
@@ -315,6 +323,7 @@ typedef union ldms_value {
 	struct ldms_list_entry v_le;
 	struct ldms_record_inst v_rec_inst;
 	struct ldms_record_type v_rec_type;
+	struct ldms_record_array v_rec_array;
 	char a_char[OVIS_FLEX_UNION];
 	uint8_t a_u8[OVIS_FLEX_UNION];
 	int8_t a_s8[OVIS_FLEX_UNION];

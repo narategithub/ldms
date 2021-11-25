@@ -106,6 +106,12 @@ typedef struct ldms_record {
 	STAILQ_HEAD(, ldms_mdef_s) rec_metric_list;
 } *ldms_record_t;
 
+typedef struct ldms_record_array_def {
+	struct ldms_mdef_s mdef; /* base */
+	int rec_type; /* index to the record type */
+	int inst_sz;
+} *ldms_record_array_def_t;
+
 struct ldms_set_info_pair {
 	char *key;
 	char *value;

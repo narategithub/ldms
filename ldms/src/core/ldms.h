@@ -1944,6 +1944,21 @@ int ldms_schema_metric_list_add(ldms_schema_t s, const char *name,
 int ldms_schema_record_add(ldms_schema_t s, ldms_record_t rec_def);
 
 /**
+ * Add an array of records to the schema.
+ *
+ * The \c rec_def must be completed (i.e. no more metrics adding to it)
+ * and must already be added to the schema (via \c ldms_schema_record_add()).
+ *
+ * \param s         The schema handle.
+ * \param rec_def   The record definition.
+ * \param array_len The length of the array.
+ *
+ * \retval >=0  The metric index.
+ * \retval <0   The negative error number (\c -errno) describing the error.
+ */
+int ldms_schema_record_array_add(ldms_schema_t s, const char *name, ldms_record_t rec_def, int array_len);
+
+/**
  * \brief Add an array metric/meta with the unit to schema
  *
  * Adds a metric of an array type to a metric set schema.
@@ -2499,6 +2514,27 @@ void ldms_record_metric_set(ldms_mval_t rec_inst, int metric_id,
 void ldms_record_metric_array_set(ldms_mval_t rec_inst, int metric_id,
 				  ldms_mval_t val, int start,
 				  int count);
+
+/**
+ * Get the record instance in the record array.
+ *
+ * \param rec_array The record array handle.
+ * \param idx       The index.
+ *
+ * \retval rec_inst The record instance "rec_array[idx]".
+ * \retval NULL     If there is an error. \c errno is also set to describe the
+ *                  error.
+ */
+ldms_mval_t ldms_record_array_get_inst(ldms_mval_t rec_array, int idx);
+
+/**
+ * Get the length of the record array.
+ *
+ * \param rec_array The record array handle.
+ *
+ * \retval len The length of the record array.
+ */
+int ldms_record_array_len(ldms_mval_t rec_array);
 
 /**
  * Append the record instance to the list.

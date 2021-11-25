@@ -330,6 +330,19 @@ void value_format(ldms_set_t s, enum ldms_value_type type, ldms_mval_t val, size
 		}
 		printf("\t}");
 		break;
+	case LDMS_V_RECORD_ARRAY:
+		printf("[\n");
+		len = ldms_record_array_len(val);
+		for (i = 0; i < len; i++) {
+			lval = ldms_record_array_get_inst(val, i);
+			value_format(s, LDMS_V_RECORD_INST, lval, 1);
+			if (i < len-1)
+				printf(",\n");
+			else
+				printf("\n");
+		}
+		printf("    ]\n");
+		break;
 	case LDMS_V_LIST:
 		printf("[");
 		i = 0;

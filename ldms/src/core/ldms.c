@@ -1169,6 +1169,9 @@ size_t __ldms_value_size_get(enum ldms_value_type t, uint32_t count)
 	case LDMS_V_RECORD_INST:
 		vsz = sizeof(struct ldms_record_inst);
 		break;
+	case LDMS_V_RECORD_ARRAY:
+		vsz = sizeof(struct ldms_record_array);
+		break;
 	default:
 		assert(0 == "Unknown type");
 		return 0;
@@ -1268,6 +1271,44 @@ void __make_mdesc(ldms_mdesc_t vd, ldms_mdef_t md, off_t *value_off)
 	} else
 		vd->vd_data_offset = 0; /* set after all metrics defined */
 
+}
+
+void __init_rec_array(ldms_set_t set, ldms_schema_t schema)
+{
+	ldms_mdef_t md;
+	ldms_record_array_def_t ra;
+	int idx, i, j;
+	struct ldms_data_hdr *dh;
+	ldms_mdesc_t ra_desc;
+	ldms_record_array_t rec_array;
+	ldms_record_inst_t rec_inst;
+
+	idx = 0;
+	STAILQ_FOREACH(md, &schema->metric_list, entry) {
+		if (md->type != LDMS_V_RECORD_ARRAY)
+			goto next;
+		ra = (void*)md;
+		ra_desc = ldms_ptr_(void, set->meta, __le32_to_cpu(set->meta->dict[idx]));
+		assert(ra_desc->vd_type == LDMS_V_RECORD_ARRAY);
+
+		/* for each set buffer */
+		for (i = 0; i < schema->array_card; i++) {
+			dh = __ldms_set_array_get(set, i);
+			/* init the rec_array */
+			rec_array = ldms_ptr_(void, dh, __le32_to_cpu(ra_desc->vd_data_offset));
+			rec_array->array_len = __cpu_to_le32(ra->mdef.count);
+			rec_array->inst_sz = __cpu_to_le32(ra->inst_sz);
+			rec_array->rec_type = __cpu_to_le32(ra->rec_type);
+			for (j = 0; j < ra->mdef.count; j++) {
+				/* init each rec_inst in the array */
+				rec_inst = ldms_ptr_(void, rec_array->data, j*ra->inst_sz);
+				rec_inst->record_type = rec_array->rec_type;
+				rec_inst->set_data_off = __cpu_to_le32(ldms_off_(dh, rec_inst));
+			}
+		}
+	next:
+		idx++;
+	}
 }
 
 ldms_set_t ldms_set_new_with_auth(const char *instance_name,
@@ -1426,6 +1467,7 @@ ldms_set_t ldms_set_new_with_auth(const char *instance_name,
 	if (meta->heap_sz)
 		set->heap = ldms_heap_get(&set->heap_inst, &set->data->heap,
 				&((uint8_t *)set->data)[schema->data_sz]);
+	__init_rec_array(set, schema);
 	return set;
 }
 
@@ -1595,6 +1637,7 @@ static char *type_names[] = {
 	[LDMS_V_LIST_ENTRY] = "entry",
 	[LDMS_V_RECORD_TYPE] = "record_type",
 	[LDMS_V_RECORD_INST] = "record_inst",
+	[LDMS_V_RECORD_ARRAY] = "record_array",
 };
 
 static enum ldms_value_type type_scalar_types[] = {
@@ -1949,7 +1992,9 @@ static ldms_mval_t __mval_to_get(struct ldms_set *s, int idx, ldms_mdesc_t *pd)
 	if (desc->vd_flags & LDMS_MDESC_F_DATA) {
 		/* Check if it is being called inside a transaction. However,
 		 * LIST always return the current buffer. */
-		if (s->data->trans.flags != LDMS_TRANSACTION_END && desc->vd_type != LDMS_V_LIST) {
+		if (s->data->trans.flags != LDMS_TRANSACTION_END &&
+		    desc->vd_type != LDMS_V_LIST &&
+		    desc->vd_type != LDMS_V_RECORD_ARRAY) {
 			/* Inside a transaction */
 			n = __le32_to_cpu(s->meta->array_card);
 			prev_data = __set_array_get(s, (s->curr_idx + (n - 1)) % n);
@@ -3299,10 +3344,55 @@ int ldms_schema_record_add(ldms_schema_t s, ldms_record_t rec_def)
 		if (!strcmp(m->name, rec_def->mdef.name))
 			return -EEXIST;
 	}
+	if (rec_def->metric_id >= 0) {
+		return -EBUSY; /* already added to a schema */
+	}
 	rec_def->metric_id = __schema_mdef_add(s, &rec_def->mdef);
 	rec_def->schema = s;
 	s->meta_sz += rec_def->type_sz;
 	return rec_def->metric_id;
+}
+
+int ldms_schema_record_array_add(ldms_schema_t s, const char *name,
+				 ldms_record_t rec_def, int array_len)
+{
+	size_t data_sz;
+	if (rec_def->metric_id < 0)
+		return -EINVAL;
+	/* check if the name is a duplicate */
+	ldms_mdef_t m;
+	ldms_record_array_def_t ra_def;
+	STAILQ_FOREACH(m, &s->metric_list, entry) {
+		if (!strcmp(m->name, name))
+			return -EEXIST;
+	}
+	ra_def = calloc(1, sizeof *ra_def);
+	if (!ra_def)
+		return -ENOMEM;
+	ra_def->mdef.name = strdup(name);
+	if (!ra_def->mdef.name)
+		goto enomem;
+	ra_def->mdef.unit = NULL;
+	ra_def->mdef.type = LDMS_V_RECORD_ARRAY;
+	ra_def->mdef.flags = LDMS_MDESC_F_DATA;
+	ra_def->mdef.count = array_len;
+	/* this only calculate meta_sz (for name and mdesc) */
+	__ldms_metric_size_get(name, NULL, LDMS_V_RECORD_ARRAY,
+			ra_def->mdef.count, &ra_def->mdef.meta_sz,
+			&ra_def->mdef.data_sz);
+	/* we need to re-calculate the data_sz as the info provided to the
+	 * generic size calculation is not enough. */
+	data_sz = sizeof(struct ldms_record_array) + array_len*rec_def->inst_sz;
+	ra_def->mdef.data_sz = roundup(data_sz, 8);
+	ra_def->inst_sz = rec_def->inst_sz;
+	ra_def->rec_type = rec_def->metric_id;
+
+	return __schema_mdef_add(s, &ra_def->mdef);
+
+enomem:
+	free(ra_def->mdef.name);
+	free(ra_def);
+	return -ENOMEM;
 }
 
 ldms_record_t ldms_record_create(const char *name)
@@ -3328,6 +3418,7 @@ ldms_record_t ldms_record_create(const char *name)
 	rec_def->mdef.unit = NULL;
 	rec_def->schema = NULL;
 	rec_def->n = 0;
+	rec_def->metric_id = -1;
 	STAILQ_INIT(&rec_def->rec_metric_list);
 	return rec_def;
  err:
@@ -4052,4 +4143,25 @@ void ldms_record_array_set_double(ldms_mval_t rec_inst, int i, int idx, double v
 		LDMS_GN_INCREMENT(data->gn);
 	} else
 		assert(0 == "Invalid metric or array index");
+}
+
+ldms_mval_t ldms_record_array_get_inst(ldms_mval_t _rec_array, int idx)
+{
+	ldms_record_inst_t rec_inst = NULL;
+	ldms_record_array_t rec_array = &_rec_array->v_rec_array;
+
+	if (idx < 0 || __le32_to_cpu(rec_array->array_len)<=idx) {
+		errno = ENOENT;
+		goto out;
+	}
+
+	rec_inst = ldms_ptr_(void, rec_array->data, idx * __le32_to_cpu(rec_array->inst_sz));
+
+ out:
+	return (void*)rec_inst;
+}
+
+int ldms_record_array_len(ldms_mval_t rec_array)
+{
+	return __le32_to_cpu(rec_array->v_rec_array.array_len);
 }

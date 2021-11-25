@@ -88,6 +88,7 @@ static int item_count = ITEM_COUNT;
 static int array_count = ARRAY_COUNT;
 ldms_record_t rec_def;
 int rec_def_idx;
+int rec_array_idx;
 
 #define stringify(_x) #_x
 struct rec_metric rec_metrics[] = {
@@ -156,6 +157,9 @@ static int create_metric_set(base_data_t base)
 	assert(rec_def_idx >= 0);
 	/* Add a list (of records) */
 	device_list_mid = ldms_schema_metric_list_add(schema, "device_list", NULL, total_sz);
+	/* Add an array of records */
+	rec_array_idx = ldms_schema_record_array_add(schema, "device_array", rec_def, ITEM_COUNT);
+	assert(rec_array_idx >= 0);
 
 	set = base_set_new(base);
 	if (!set) {
@@ -322,7 +326,7 @@ void value_setter(ldms_mval_t mval, enum ldms_value_type typ, int item)
 
 static int sample(struct ldmsd_sampler *self)
 {
-	ldms_mval_t lh, rec_inst, mval;
+	ldms_mval_t lh, rec_inst, mval, rec_array;
 	struct rec_metric *m;
 	enum ldms_value_type typ;
 	size_t count;
@@ -359,6 +363,14 @@ static int sample(struct ldmsd_sampler *self)
 		i++;
 	}
 	assert( i == item_count );
+	rec_array = ldms_metric_get(set, rec_array_idx);
+	for (i = 0; i < ITEM_COUNT; i++) {
+		rec_inst = ldms_record_array_get_inst(rec_array, i);
+		for (m = rec_metrics; m->name; m++) {
+			mval = ldms_record_metric_get(rec_inst, m->mid);
+			value_setter(mval, m->type, round + i + ITEM_COUNT);
+		}
+	}
 
 	ldms_metric_set_u32(set, round_mid, round);
 	base_sample_end(base);

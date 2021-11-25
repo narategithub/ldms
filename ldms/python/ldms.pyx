@@ -476,6 +476,9 @@ cdef py_ldms_metric_get_record_type(Set s, int m_idx):
     cdef ldms_mval_t lt = ldms_metric_get(s.rbd, m_idx)
     return RecordType(s, PTR(lt))
 
+cdef py_ldms_metric_get_record_array(Set s, int m_idx):
+    return RecordArray(s, m_idx)
+
 METRIC_GETTER_TBL = {
         LDMS_V_CHAR : py_ldms_metric_get_char,
         LDMS_V_U8   : py_ldms_metric_get_u8,
@@ -505,6 +508,7 @@ METRIC_GETTER_TBL = {
         LDMS_V_LIST : py_ldms_metric_get_list,
 
         LDMS_V_RECORD_TYPE : py_ldms_metric_get_record_type,
+        LDMS_V_RECORD_ARRAY : py_ldms_metric_get_record_array,
     }
 
 
@@ -694,6 +698,9 @@ cdef py_ldms_metric_set_list(Set s, int m_idx, val):
 cdef py_ldms_metric_set_record_type(Set s, int m_idx, val):
     raise ValueError("record type cannot be set")
 
+cdef py_ldms_metric_set_record_array(Set s, int m_idx, val):
+    raise ValueError("record array cannot be set")
+
 METRIC_SETTER_TBL = {
         LDMS_V_CHAR : py_ldms_metric_set_char,
         LDMS_V_U8   : py_ldms_metric_set_u8,
@@ -722,6 +729,7 @@ METRIC_SETTER_TBL = {
 
         LDMS_V_LIST : py_ldms_metric_set_list,
         LDMS_V_RECORD_TYPE : py_ldms_metric_set_record_type,
+        LDMS_V_RECORD_ARRAY : py_ldms_metric_set_record_array,
     }
 
 
@@ -1200,6 +1208,9 @@ LDMS_VALUE_TYPE_TBL = {
         LDMS_V_D64_ARRAY  : LDMS_V_D64_ARRAY,
 
         LDMS_V_LIST       : LDMS_V_LIST,
+
+        LDMS_V_RECORD_ARRAY : LDMS_V_RECORD_ARRAY,
+        "record_array"      : LDMS_V_RECORD_ARRAY,
     }
 
 cdef ldms_value_type LDMS_VALUE_TYPE(t):
@@ -1703,7 +1714,8 @@ cdef class Schema(object):
         self.rec_defs[_id] = rec_def
         self.rec_defs[rec_def.name] = rec_def
 
-    def add_metric(self, name, metric_type, count=1, meta=False, units=None):
+    def add_metric(self, name, metric_type, count=1, meta=False, units=None,
+                         rec_def=None):
         """S.add_metric(name, type, count=1, meta=False, units=None)
 
         Add a metric to the schema
@@ -1713,6 +1725,7 @@ cdef class Schema(object):
         cdef int idx
         cdef char *u = NULL
         cdef bytes b
+        cdef RecordDef _rec_def
 
         if type(metric_type) == RecordDef:
             self.add_record(metric_type)
@@ -1720,7 +1733,13 @@ cdef class Schema(object):
         if type(metric_type) == str:
             metric_type = metric_type.lower()
         t = LDMS_VALUE_TYPE(metric_type)
-        if t == LDMS_V_LIST:
+        if t == LDMS_V_RECORD_ARRAY:
+            if type(rec_def) != RecordDef:
+                raise TypeError("Expecting RecordRef `rec_def`")
+            _rec_def = <RecordDef>rec_def
+            idx = ldms_schema_record_array_add(self._schema, BYTES(name),
+                    _rec_def._rec_def, count)
+        elif t == LDMS_V_LIST:
             if units is not None:
                 b = BYTES(units)
                 u = b
@@ -1753,12 +1772,16 @@ cdef class Schema(object):
             if type(o) in (list, tuple):
                 self.add_metric(*o)
             elif type(o) == dict:
+                mtype = o.get("type")
+                if mtype is None:
+                    mtype = o.get("metric_type")
                 self.add_metric(
                             name = o["name"],
-                            metric_type = o["type"],
+                            metric_type = mtype,
                             count = o.get("count", 1),
                             meta = o.get("meta", False),
                             units = o.get("units"),
+                            rec_def = o.get("rec_def"),
                         )
             elif type(o) == RecordDef:
                 self.add_record(o)
@@ -1941,6 +1964,130 @@ cdef class MetricArray(list):
 
     def json_obj(self):
         return [ JSON_OBJ(v) for v in self ]
+
+
+cdef class RecordArray(list):
+    """A list-like object for record array access
+
+    The application does not create this object directly, but rather
+    obtain RecordArray object by getting a metric of type LDMS_V_RECORD_ARRAY
+    from an LDMS Set.
+
+    Usage examples:
+    >>> a = _my_set[12] # assuming that _my_set[12] is LDMS_V_RECORD_ARRAY of length 5
+    >>> len(a) # get the length of the metric array
+    >>> for rec in a: # iterate through all records in the array
+    ...   print(rec)
+    >>> rec = a[2] # get the record object at index 2
+    >>> rec = a[-1] # negative index works too, a[-1] is a[4]
+    """
+
+    cdef Set _set
+    cdef ldms_set_t _rbd
+    cdef size_t _len
+    cdef int _mid
+    cdef ldms_mval_t _rec_array
+
+    def __init__(self, Set lset, int metric_id):
+        cdef ldms_value_type typ
+        self._set = lset
+        self._rbd = lset.rbd
+        self._mid = metric_id
+        typ = ldms_metric_type_get(self._rbd, self._mid)
+        if typ != LDMS_V_RECORD_ARRAY:
+            raise TypeError("Unexpected type: {}".format(typ))
+        self._rec_array = ldms_metric_get(self._rbd, self._mid)
+        self._len = ldms_record_array_len(self._rec_array)
+
+    def __len__(self):
+        return self._len
+
+    def __iter__(self):
+        for i in range(0, len(self)):
+            yield self[i]
+
+    def __reversed__(self):
+        _len = len(self)
+        for i in range(0, _len):
+            yield self[_len - i - 1]
+
+    def _get_item(self, idx):
+        cdef ldms_mval_t _rec_inst
+        if idx not in range(len(self)):
+            raise IndexError("Index out of range")
+        _rec_inst = ldms_record_array_get_inst(self._rec_array, idx)
+        if not _rec_inst:
+            raise IndexError("ldms_record_array_get_inst() error: {}". \
+                             format(errno))
+        ptr = PTR(_rec_inst)
+        return RecordInstance(self._set, ptr)
+
+    def __getitem__(self, idx):
+        if type(idx) == slice:
+            return [ self._get_item(i) for i in range(*idx.indices(self._len)) ]
+        if idx < 0:
+            idx += self._len
+        return self._get_item(idx)
+
+    def __setitem__(self, idx, val):
+        raise ValueError("RecordArray item cannot be set")
+
+    def __delitem__(self, key):
+        raise TypeError("RecordArray does not support item deletion")
+
+    def __repr__(self):
+        sio = io.StringIO()
+        print("[", ", ".join(str(s) for s in self), "]", file=sio, end="", sep="")
+        return sio.getvalue()
+
+    def __call__(self, *args, **kwargs):
+        return self # mimic py_ldms_metric_get_* functions
+
+    def __iadd__(self, other):
+        raise TypeError("RecordArray does not support element appending")
+
+    def append(self, element):
+        raise TypeError("RecordArray does not support element appending")
+
+    def __imul__(self, val):
+        raise TypeError("RecordArray does not support `*=` operation")
+
+    def __mul__(self, val):
+        raise TypeError("RecordArray does not support `*` operation")
+
+    def __rmul__(self, val):
+        raise TypeError("RecordArray does not support `*` operation")
+
+    def clear(self):
+        raise TypeError("RecordArray does not support `clear()`")
+
+    def copy(self):
+        raise TypeError("RecordArray does not support `copy()`")
+
+    def count(self, *args):
+        raise TypeError("RecordArray does not support `count()`")
+
+    def extend(self, *args):
+        raise TypeError("RecordArray does not support `extend()`")
+
+    def index(self, *args):
+        raise TypeError("RecordArray does not support `index()`")
+
+    def pop(self, *args):
+        raise TypeError("RecordArray does not support `pop()`")
+
+    def remove(self, *args):
+        raise TypeError("RecordArray does not support `remove()`")
+
+    def reverse(self, *args):
+        raise TypeError("RecordArray does not support `reverse()`")
+
+    def sort(self, *args):
+        raise TypeError("RecordArray does not support `sort()`")
+
+    def json_obj(self):
+        return [ JSON_OBJ(v) for v in self ]
+
 
 
 cdef __ldms_list_append(ldms_set_t cset, ldms_mval_t lh, ldms_value_type v_type, int n):

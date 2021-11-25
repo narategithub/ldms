@@ -383,6 +383,7 @@ cdef extern from "ldms.h" nogil:
         V_LIST_ENTRY  "LDMS_V_LIST_ENTRY"
         V_RECORD_TYPE      "LDMS_V_RECORD_TYPE"
         V_RECORD_INST      "LDMS_V_RECORD_INST"
+        V_RECORD_ARRAY     "LDMS_V_RECORD_ARRAY"
         V_FIRST       "LDMS_V_FIRST"
         V_LAST        "LDMS_V_LAST"
         LDMS_V_NONE
@@ -412,6 +413,7 @@ cdef extern from "ldms.h" nogil:
         LDMS_V_LIST_ENTRY
         LDMS_V_RECORD_TYPE
         LDMS_V_RECORD_INST
+        LDMS_V_RECORD_ARRAY
         LDMS_V_FIRST
         LDMS_V_LAST
     union ldms_value:
@@ -545,6 +547,8 @@ cdef extern from "ldms.h" nogil:
 			   const char *unit, ldms_value_type type,
 			   size_t count)
     int ldms_schema_record_add(ldms_schema_t s, ldms_record_t rec_def)
+    int ldms_schema_record_array_add(ldms_schema_t s, const char *name,
+                                     ldms_record_t rec_def, int array_len)
     size_t ldms_record_heap_size_get(ldms_record_t rec_def)
 
     # --- record instance functions --- #
@@ -607,6 +611,9 @@ cdef extern from "ldms.h" nogil:
     void    ldms_record_array_set_s64(ldms_mval_t rec_inst, int metric_id, int idx,  int64_t val)
     void  ldms_record_array_set_float(ldms_mval_t rec_inst, int metric_id, int idx,    float val)
     void ldms_record_array_set_double(ldms_mval_t rec_inst, int metric_id, int idx,   double val)
+
+    ldms_mval_t ldms_record_array_get_inst(ldms_mval_t rec_array, int idx);
+    int ldms_record_array_len(ldms_mval_t rec_array)
 
 
 cdef extern from "asm/byteorder.h" nogil:
