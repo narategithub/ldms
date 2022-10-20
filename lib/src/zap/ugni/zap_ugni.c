@@ -2267,6 +2267,13 @@ zap_err_t z_ugni_accept(zap_ep_t ep, zap_cb_fn_t cb, char *data, size_t data_len
 		goto out;
 	}
 
+	rc = zap_io_thread_ep_assign(ep);
+	if (rc) {
+		zerr = ZAP_ERR_RESOURCE;
+		EP_UNLOCK(uep);
+		goto out;
+	}
+
 	uep->ep.cb = cb;
 	uep->app_accepted = 1;
 	rc = z_ugni_setup_conn(uep, &uep->mbuf.msg.connect.ep_desc);
@@ -2912,7 +2919,7 @@ static void z_ugni_handle_cq_event(struct z_ugni_io_thread *thr)
 }
 
 /* EP_LOCK is NOT held */
-static void z_ugni_sock_conn_request(struct z_ugni_ep *uep)
+static void z_ugni_sock_conn_request(z_ugni_io_thread_t thr, struct z_ugni_ep *uep)
 {
 	int rc;
 	zap_ep_t new_ep;
@@ -2967,12 +2974,7 @@ static void z_ugni_sock_conn_request(struct z_ugni_ep *uep)
 	new_uep->ev.events = EPOLLIN;
 	new_uep->ev.data.ptr = &new_uep->sock_epoll_ctxt;
 
-	rc = zap_io_thread_ep_assign(new_ep);
-	if (rc) {
-		LOG_(new_uep, "thread assignment error: %d\n", rc);
-		zap_free(new_ep);
-		return;
-	}
+	epoll_ctl(thr->efd, EPOLL_CTL_ADD, new_uep->sock, &new_uep->ev);
 
 	/*
 	 * NOTE: At this point, the connection is socket-connected. The next
@@ -3200,7 +3202,7 @@ static int z_ugni_setup_conn(struct z_ugni_ep *uep, struct z_ugni_ep_desc *ep_de
 }
 
 /* EP_LOCK is NOT held */
-static void z_ugni_sock_recv(struct z_ugni_ep *uep)
+static void z_ugni_sock_recv(z_ugni_io_thread_t thr, struct z_ugni_ep *uep)
 {
 	int n, mlen;
 	struct zap_ugni_msg *msg;
@@ -3243,6 +3245,11 @@ static void z_ugni_sock_recv(struct z_ugni_ep *uep)
 	uep->sock_off = 0;
 
 	msg = &uep->mbuf.msg;
+
+	if (uep->ep.state == ZAP_EP_ACCEPTING && uep->ep.thread == NULL) {
+		struct epoll_event ignore;
+		epoll_ctl(thr->efd, EPOLL_CTL_DEL, uep->sock, &ignore);
+	}
 
 	/* network-to-host */
 	msg->hdr.msg_len = ntohl(msg->hdr.msg_len);
@@ -3398,7 +3405,7 @@ static void z_ugni_process_sock_send_comp(z_ugni_ep_t uep)
 	}
 }
 
-static void z_ugni_handle_sock_event(struct z_ugni_ep *uep, int events)
+static void z_ugni_handle_sock_event(z_ugni_io_thread_t thr, struct z_ugni_ep *uep, int events)
 {
 	__get_ep(&uep->ep, "sock_event");
 	EP_LOCK(uep);
@@ -3410,7 +3417,7 @@ static void z_ugni_handle_sock_event(struct z_ugni_ep *uep, int events)
 			    "but got: %d\n", EPOLLIN, events);
 			goto out;
 		}
-		z_ugni_sock_conn_request(uep);
+		z_ugni_sock_conn_request(thr, uep);
 		goto out;
 	}
 	if (events & EPOLLHUP) {
@@ -3441,7 +3448,7 @@ static void z_ugni_handle_sock_event(struct z_ugni_ep *uep, int events)
 	EP_UNLOCK(uep);
 	if ((events & EPOLLIN) && uep->sock >= 0) {
 		/* NOTE: sock may be disabled by z_ugni_sock_XXX(uep) above */
-		z_ugni_sock_recv(uep);
+		z_ugni_sock_recv(thr, uep);
 	}
  out:
 	__put_ep(&uep->ep, "sock_event");
@@ -3615,7 +3622,7 @@ static void *z_ugni_io_thread_proc(void *arg)
 			break;
 		case Z_UGNI_SOCK_EVENT:
 			uep = container_of(ctxt, struct z_ugni_ep, sock_epoll_ctxt);
-			z_ugni_handle_sock_event(uep, ev[i].events);
+			z_ugni_handle_sock_event(thr, uep, ev[i].events);
 			break;
 		case Z_UGNI_ZQ_EVENT:
 			z_ugni_handle_zq_events(thr, ev[i].events);
