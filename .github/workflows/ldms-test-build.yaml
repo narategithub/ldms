@@ -12,19 +12,19 @@ jobs:
     container:
       image: ovishpc/ldms-dev
     steps:
-    - name: build-sos
-      shell: bash
-      run: | # SOS prequisite
-        set -e
-        mkdir /sos-src
-        pushd /sos-src
-        git clone https://github.com/ovis-hpc/sos .
-        ./autogen.sh
-        mkdir -p build
-        pushd build
-        ../configure --prefix=/opt/ovis
-        make
-        make install
+#    - name: build-sos
+#      shell: bash
+#      run: | # SOS prequisite
+#        set -e
+#        mkdir /sos-src
+#        pushd /sos-src
+#        git clone https://github.com/ovis-hpc/sos .
+#        ./autogen.sh
+#        mkdir -p build
+#        pushd build
+#        ../configure --prefix=/opt/ovis
+#        make
+#        make install
     - uses: actions/checkout@v2
     - run: sh autogen.sh
     - name: build-ovis
@@ -34,36 +34,35 @@ jobs:
         PREFIX=/opt/ovis
         OPTIONS=(
         --prefix=${PREFIX}
-        --enable-python
+	--enable-python
+	--enable-etc
+	--enable-doc
+	--enable-doc-man
 
-        # test stuff
-        --enable-ldms-test
-        --enable-zaptest
-        --enable-test_sampler
-        --enable-list_sampler
-        --enable-record_sampler
+	# tests
+	--enable-zaptest
+	--enable-ldms-test
+	--enable-test_sampler
+	--enable-list_sampler
+	--enable-record_sampler
 
-        --enable-munge
+	# extra xprt
+	--enable-rdma
 
-        --enable-sos
-        --with-sos=${PREFIX}
+	# auth
+	--enable-munge
 
-        # xprt
-        --enable-rdma
-        --enable-fabric
-        --with-libfabric=/usr
+	# stores
+        #--enable-sos
+        #--with-sos=${PREFIX}
+        #--enable-store-app
+        --with-kafka=yes
 
-        # app stuff
-        --enable-store-app
-        --enable-app-sampler
-
-        # etc and doc
-        --enable-etc
-        --enable-doc
-        --enable-doc-man
-
-        # kafka
-        --with-kafka
+	# samplers
+	--enable-tutorial-sampler
+	--enable-tutorial-store
+	--enable-app-sampler
+	--enable-papi
 
         CFLAGS="-Wall -Werror -O0 -ggdb3"
         )
