@@ -2,9 +2,9 @@ name: Test "make dist"
 
 on:
   push:
-    branches: [ OVIS-4 ]
+    branches: [ OVIS-4-x ]
   pull_request:
-    branches: [ OVIS-4 ]
+    branches: [ OVIS-4-x ]
 
 jobs:
   build:

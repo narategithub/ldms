@@ -21,9 +21,9 @@ name: Compatibility test with OVIS-4.3.3
 
 on:
   push:
-    branches: [ OVIS-4 ]
+    branches: [ OVIS-4-x ]
   pull_request:
-    branches: [ OVIS-4 ]
+    branches: [ OVIS-4-x ]
 
 defaults:
   run:
