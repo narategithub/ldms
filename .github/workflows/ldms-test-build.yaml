@@ -1,0 +1,71 @@
+name: OVIS-4 build test compatible with ldms-test
+
+on:
+  push:
+    branches: [ OVIS-4 ]
+  pull_request:
+    branches: [ OVIS-4 ]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container:
+      image: ovishpc/ldms-dev
+    steps:
+    - name: build-sos
+      shell: bash
+      run: | # SOS prequisite
+        set -e
+        mkdir /sos-src
+        pushd /sos-src
+        git clone https://github.com/ovis-hpc/sos .
+        ./autogen.sh
+        mkdir -p build
+        pushd build
+        ../configure --prefix=/opt/ovis
+        make
+        make install
+    - uses: actions/checkout@v2
+    - run: sh autogen.sh
+    - name: build-ovis
+      shell: bash
+      run: |
+        mkdir -p build
+        PREFIX=/opt/ovis
+        OPTIONS=(
+        --prefix=${PREFIX}
+        --enable-python
+
+        # test stuff
+        --enable-ldms-test
+        --enable-zaptest
+        --enable-test_sampler
+        --enable-list_sampler
+        --enable-record_sampler
+
+        --enable-munge
+
+        --enable-sos
+        --with-sos=${PREFIX}
+
+        # xprt
+        --enable-rdma
+        --enable-fabric
+        --with-libfabric=/usr
+
+        # app stuff
+        --enable-store-app
+        --enable-app-sampler
+
+        # etc and doc
+        --enable-etc
+        --enable-doc
+        --enable-doc-man
+
+        # kafka
+        --with-kafka
+
+        CFLAGS="-Wall -Werror -O0 -ggdb3"
+        )
+        ./configure "${OPTIONS[@]}"
+        make
