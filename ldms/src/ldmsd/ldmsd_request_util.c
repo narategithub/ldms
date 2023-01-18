@@ -98,7 +98,7 @@ const struct req_str_id req_str_id_table[] = {
 	{  "prdcr_status",       LDMSD_PRDCR_STATUS_REQ  },
 	{  "prdcr_stop",         LDMSD_PRDCR_STOP_REQ  },
 	{  "prdcr_stop_regex",   LDMSD_PRDCR_STOP_REGEX_REQ  },
-	{  "prdcr_stream_dir",   LDMSD_PRDCR_STREAM_DIR_REQ  },
+	{  "prdcr_stream_status",LDMSD_PRDCR_STREAM_STATUS_REQ  },
 	{  "prdcr_subscribe",    LDMSD_PRDCR_SUBSCRIBE_REQ },
 	{  "prdcr_unsubscribe",  LDMSD_PRDCR_UNSUBSCRIBE_REQ },
 	{  "set_route",          LDMSD_SET_ROUTE_REQ  },
@@ -110,7 +110,7 @@ const struct req_str_id req_str_id_table[] = {
 	{  "start",              LDMSD_PLUGN_START_REQ  },
 	{  "stop",               LDMSD_PLUGN_STOP_REQ  },
 	{  "stream_client_dump", LDMSD_STREAM_CLIENT_DUMP_REQ  },
-	{  "stream_dir",         LDMSD_STREAM_DIR_REQ  },
+	{  "stream_status",         LDMSD_STREAM_STATUS_REQ  },
 	{  "strgp_add",          LDMSD_STRGP_ADD_REQ  },
 	{  "strgp_del",          LDMSD_STRGP_DEL_REQ  },
 	{  "strgp_metric_add",   LDMSD_STRGP_METRIC_ADD_REQ  },
@@ -309,7 +309,7 @@ const char *ldmsd_req_id2str(enum ldmsd_request req_id)
 	case LDMSD_STREAM_SUBSCRIBE_REQ : return "STREAM_SUBSCRIBE_REQ";
 	case LDMSD_STREAM_PUBLISH_REQ : return "STREAM_PUBLISH_REQ";
 	case LDMSD_STREAM_NEW_REQ : return "STREAM_NEW_REQ";
-	case LDMSD_STREAM_DIR_REQ : return "STREAM_DIR_REQ";
+	case LDMSD_STREAM_STATUS_REQ : return "STREAM_DIR_REQ";
 	default: return "UNKNOWN_REQ";
 	}
 }

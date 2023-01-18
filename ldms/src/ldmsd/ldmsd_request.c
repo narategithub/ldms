@@ -202,7 +202,7 @@ static int prdcr_status_handler(ldmsd_req_ctxt_t req_ctxt);
 static int prdcr_set_status_handler(ldmsd_req_ctxt_t req_ctxt);
 static int prdcr_subscribe_regex_handler(ldmsd_req_ctxt_t req_ctxt);
 static int prdcr_unsubscribe_regex_handler(ldmsd_req_ctxt_t req_ctxt);
-static int prdcr_stream_dir_handler(ldmsd_req_ctxt_t req_ctxt);
+static int prdcr_stream_status_handler(ldmsd_req_ctxt_t req_ctxt);
 static int strgp_add_handler(ldmsd_req_ctxt_t req_ctxt);
 static int strgp_del_handler(ldmsd_req_ctxt_t req_ctxt);
 static int strgp_start_handler(ldmsd_req_ctxt_t req_ctxt);
@@ -282,7 +282,7 @@ static int stream_subscribe_handler(ldmsd_req_ctxt_t reqc);
 static int stream_unsubscribe_handler(ldmsd_req_ctxt_t reqc);
 static int stream_client_dump_handler(ldmsd_req_ctxt_t reqc);
 static int stream_new_handler(ldmsd_req_ctxt_t reqc);
-static int stream_dir_handler(ldmsd_req_ctxt_t reqc);
+static int stream_status_handler(ldmsd_req_ctxt_t reqc);
 
 static int listen_handler(ldmsd_req_ctxt_t reqc);
 
@@ -342,8 +342,8 @@ static struct request_handler_entry request_handler[] = {
 		LDMSD_PRDCR_UNSUBSCRIBE_REQ, prdcr_unsubscribe_regex_handler,
 		XUG | LDMSD_PERM_FAILOVER_ALLOWED | MOD
 	},
-	[LDMSD_PRDCR_STREAM_DIR_REQ] = {
-		LDMSD_PRDCR_STREAM_DIR_REQ, prdcr_stream_dir_handler,
+	[LDMSD_PRDCR_STREAM_STATUS_REQ] = {
+		LDMSD_PRDCR_STREAM_STATUS_REQ, prdcr_stream_status_handler,
 		XUG | LDMSD_PERM_FAILOVER_ALLOWED
 	},
 
@@ -598,8 +598,8 @@ static struct request_handler_entry request_handler[] = {
 	[LDMSD_STREAM_NEW_REQ] = {
 		LDMSD_STREAM_NEW_REQ, stream_new_handler, XUG | MOD
 	},
-	[LDMSD_STREAM_DIR_REQ] = {
-		LDMSD_STREAM_DIR_REQ, stream_dir_handler, XUG
+	[LDMSD_STREAM_STATUS_REQ] = {
+		LDMSD_STREAM_STATUS_REQ, stream_status_handler, XUG
 	},
 
 	/* LISTEN */
@@ -1909,7 +1909,7 @@ struct prdcr_stream_dir_ctxt {
 	struct prdcr_stream_dir_regex_ctxt *base;
 };
 
-static int __process_stream_dir(struct prdcr_stream_dir_ctxt *ctxt, char *data, size_t data_len)
+static int __process_stream_status(struct prdcr_stream_dir_ctxt *ctxt, char *data, size_t data_len)
 {
 	int rc = 0;
 	json_parser_t parser;
@@ -1946,7 +1946,7 @@ free_json:
 	return rc;
 }
 
-static int __on_stream_dir_resp(ldmsd_req_cmd_t rcmd)
+static int __on_stream_status_resp(ldmsd_req_cmd_t rcmd)
 {
 	int rc = 0;
 	struct prdcr_stream_dir_ctxt *ctxt = rcmd->ctxt;
@@ -1957,7 +1957,7 @@ static int __on_stream_dir_resp(ldmsd_req_cmd_t rcmd)
 	ldmsd_req_attr_t attr = ldmsd_first_attr(resp);
 	assert(attr->attr_id == LDMSD_ATTR_JSON);
 	pthread_mutex_lock(&ctxt->base->lock);
-	rc = __process_stream_dir(ctxt, (char*)attr->attr_value, attr->attr_len);
+	rc = __process_stream_status(ctxt, (char*)attr->attr_value, attr->attr_len);
 	pthread_mutex_unlock(&ctxt->base->lock);
 	free(ctxt);
 
@@ -1985,7 +1985,7 @@ out:
 	return rc;
 }
 
-static int __prdcr_stream_dir(ldmsd_prdcr_t prdcr, ldmsd_req_ctxt_t oreqc,
+static int __prdcr_stream_status(ldmsd_prdcr_t prdcr, ldmsd_req_ctxt_t oreqc,
 				struct prdcr_stream_dir_regex_ctxt *base)
 {
 	int rc;
@@ -2001,8 +2001,8 @@ static int __prdcr_stream_dir(ldmsd_prdcr_t prdcr, ldmsd_req_ctxt_t oreqc,
 	ldmsd_prdcr_lock(prdcr);
 	if (prdcr->conn_state == LDMSD_PRDCR_STATE_CONNECTED) {
 		/* issue stream subscribe request right away if connected */
-		rcmd = ldmsd_req_cmd_new(prdcr->xprt, LDMSD_STREAM_DIR_REQ,
-					 oreqc, __on_stream_dir_resp, ctxt);
+		rcmd = ldmsd_req_cmd_new(prdcr->xprt, LDMSD_STREAM_STATUS_REQ,
+					 oreqc, __on_stream_status_resp, ctxt);
 		rc = errno;
 		if (!rcmd)
 			goto rcmd_err;
@@ -2022,7 +2022,7 @@ static int __prdcr_stream_dir(ldmsd_prdcr_t prdcr, ldmsd_req_ctxt_t oreqc,
 	return rc;
 }
 
-int prdcr_stream_dir_handler(ldmsd_req_ctxt_t reqc)
+int prdcr_stream_status_handler(ldmsd_req_ctxt_t reqc)
 {
 	int rc;
 	char *prdcr_regex;
@@ -2061,7 +2061,7 @@ int prdcr_stream_dir_handler(ldmsd_req_ctxt_t reqc)
 		rc = regexec(&regex, prdcr->obj.name, 0, NULL, 0);
 		if (rc)
 			continue;
-		(void) __prdcr_stream_dir(prdcr, reqc, ctxt); /* Ignore the failed one */
+		(void) __prdcr_stream_status(prdcr, reqc, ctxt); /* Ignore the failed one */
 		count++;
 	}
 	ldmsd_cfg_unlock(LDMSD_CFGOBJ_PRDCR);
@@ -3911,7 +3911,7 @@ void __updtr_stats(ldmsd_prdcr_set_t prdset, int *skipped_cnt,
 }
 
 int __updtr_status_json_obj(ldmsd_req_ctxt_t reqc, ldmsd_updtr_t updtr,
-							int updtr_cnt)
+						int updtr_cnt, int reset)
 {
 	int rc;
 	ldmsd_prdcr_ref_t ref;
@@ -3981,6 +3981,10 @@ int __updtr_status_json_obj(ldmsd_req_ctxt_t reqc, ldmsd_updtr_t updtr,
 			while (prdset) {
 				__updtr_stats(prdset, &skipped_cnt,
 						     &oversampled_cnt);
+				if (reset) {
+					prdset->oversampled_cnt = 0;
+					prdset->skipped_upd_cnt = 0;
+				}
 				prdset = ldmsd_prdcr_set_next(prdset);
 			}
 		} else {
@@ -3998,6 +4002,10 @@ int __updtr_status_json_obj(ldmsd_req_ctxt_t reqc, ldmsd_updtr_t updtr,
 					}
 					__updtr_stats(prdset, &skipped_cnt,
 							     &oversampled_cnt);
+					if (reset) {
+						prdset->oversampled_cnt = 0;
+						prdset->skipped_upd_cnt = 0;
+					}
 				next:
 					prdset = ldmsd_prdcr_set_next(prdset);
 				}
@@ -4018,10 +4026,10 @@ static int updtr_status_handler(ldmsd_req_ctxt_t reqc)
 	int rc;
 	size_t cnt = 0;
 	struct ldmsd_req_attr_s attr;
-	char *name;
-	int updtr_cnt;
+	char *name, *reset_s;
+	int updtr_cnt, reset;
 	ldmsd_updtr_t updtr = NULL;
-
+	reset = 0;
 	reqc->errcode = 0;
 
 	name = ldmsd_req_attr_str_value_get_by_id(reqc, LDMSD_ATTR_NAME);
@@ -4039,9 +4047,16 @@ static int updtr_status_handler(ldmsd_req_ctxt_t reqc)
 		}
 	}
 
+	reset_s = ldmsd_req_attr_str_value_get_by_id(reqc, LDMSD_ATTR_RESET);
+	if (reset_s) {
+		if (0 != strcasecmp(reset_s, "false"))
+			reset = 1;
+		free(reset_s);
+	}
+
 	/* Construct the json object of the updater(s) */
 	if (updtr) {
-		rc = __updtr_status_json_obj(reqc, updtr, 0);
+		rc = __updtr_status_json_obj(reqc, updtr, 0, reset);
 		if (rc)
 			goto out;
 	} else {
@@ -4049,7 +4064,7 @@ static int updtr_status_handler(ldmsd_req_ctxt_t reqc)
 		ldmsd_cfg_lock(LDMSD_CFGOBJ_UPDTR);
 		for (updtr = ldmsd_updtr_first(); updtr;
 				updtr = ldmsd_updtr_next(updtr)) {
-			rc = __updtr_status_json_obj(reqc, updtr, updtr_cnt);
+			rc = __updtr_status_json_obj(reqc, updtr, updtr_cnt, reset);
 			if (rc) {
 				ldmsd_cfg_unlock(LDMSD_CFGOBJ_UPDTR);
 				goto out;
@@ -6854,6 +6869,10 @@ static int stream_republish_cb(ldmsd_stream_client_t c, void *ctxt,
 	if (rc)
 		goto out;
 	rc = ldmsd_req_cmd_attr_term(rcmd);
+	if (rc)
+		goto out;
+
+	rc = ldmsd_client_stream_pubstats_update(c, data_len);
  out:
 	ldmsd_req_cmd_free(rcmd);
 	return rc;
@@ -7115,7 +7134,7 @@ static int stream_new_handler(ldmsd_req_ctxt_t reqc)
 	return 0;
 }
 
-static int stream_dir_handler(ldmsd_req_ctxt_t reqc)
+static int stream_status_handler(ldmsd_req_ctxt_t reqc)
 {
 	int rc;
 	char *s;

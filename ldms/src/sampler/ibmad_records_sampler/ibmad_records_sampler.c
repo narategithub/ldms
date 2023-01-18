@@ -13,6 +13,7 @@
 #include <string.h>
 #include <dirent.h>
 #include <coll/rbt.h>
+#include <ctype.h>
 #include <sys/queue.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -49,6 +50,7 @@ static struct {
 	bool use_rate_metrics;
 	int port_filter;
 	struct port_name ports[MAX_CA_NAMES];
+        time_t refresh_interval;
 } conf;
 
 static ldmsd_msg_log_f log_fn;
@@ -443,33 +445,46 @@ static void interfaces_tree_refresh()
 			char name_and_port[UMAD_CA_NAME_LEN+128];
 			struct rbn *rbn;
 			struct interface_data *data;
+                        umad_port_t *port = ca.ports[j];
 
-			if (ca.ports[j] == NULL)
+			if (port == NULL)
 				continue;
 			else
 				cnt++;
 
-			if (!collect_ca_port(ca_names[i], ca.ports[j]->portnum)) {
+			if (!collect_ca_port(ca_names[i], port->portnum)) {
 				continue;
 			}
-			if (ca.ports[j]->state != PORT_STATE_ACTIVE) {
+			if (port->state != PORT_STATE_ACTIVE) {
                                 log_fn(LDMSD_LDEBUG, SAMP" metric_tree_refresh() skipping non-active ca %s port %d\n",
-                                       ca.ports[j]->ca_name, ca.ports[j]->portnum);
+                                       port->ca_name, port->portnum);
 				continue;
 			}
+                        /* There are at least two known link_layer types:
+                           InfiniBand, Ethernet. In particular, a RoCE implmentation,
+                           the "Broadcom NetXtreme-C/E RoCE Driver HCA", reports
+                           as having a link_layer of "Ethernet". mdc_rpc_open_port()
+                           will fail for those ports. Thus we skip anything that is
+                           not using link_layer "InfiniBand". */
+                        if (port->link_layer != NULL &&
+                            strncmp(port->link_layer, "InfiniBand", 10) != 0) {
+                                log_fn(LDMSD_LDEBUG, SAMP" metric_tree_refresh() skipping ca %s port %d link_layer \"%s\" (link_layer is not \"InfiniBand\")\n",
+                                       port->ca_name, port->portnum, port->link_layer);
+                                continue;
+                        }
 
 			snprintf(name_and_port, sizeof(name_and_port), "%s.%d",
-				 ca.ports[j]->ca_name,
-				 ca.ports[j]->portnum);
+				 port->ca_name,
+				 port->portnum);
 			rbn = rbt_find(&interfaces_tree, name_and_port);
 			if (rbn) {
 				data = container_of(rbn, struct interface_data,
 						    interface_rbn);
 				rbt_del(&interfaces_tree, &data->interface_rbn);
 			} else {
-				data = interface_create(ca.ports[j]->ca_name,
-							ca.ports[j]->portnum,
-							ca.ports[j]->base_lid);
+				data = interface_create(port->ca_name,
+							port->portnum,
+							port->base_lid);
 			}
 			if (data == NULL)
 				continue;
@@ -718,6 +733,28 @@ static int parse_port_filters(const char *val)
 	return 0;
 }
 
+/* strip leading and trailing whitespace */
+static void strip_whitespace(char **start)
+{
+        /* strip leading whitespace */
+        while (isspace(**start)) {
+                (*start)++;
+        }
+
+        /* strip trailing whitespace */
+        char * last;
+        last = *start + strlen(*start) - 1;
+        while (last > *start) {
+                if (isspace(last[0])) {
+                        last--;
+                } else {
+                        break;
+                }
+        }
+        last[1] = '\0';
+}
+
+
 static int config(struct ldmsd_plugin *self,
                   struct attr_value_list *kwl, struct attr_value_list *avl)
 {
@@ -755,6 +792,23 @@ static int config(struct ldmsd_plugin *self,
                 goto err;
         }
 
+        value = av_value(avl, "refresh_interval_sec");
+        if (value != NULL) {
+                char *end;
+                long val;
+
+                strip_whitespace(&value);
+                val = strtol(value, &end, 10);
+                if (*end != '\0') {
+                        log_fn(LDMSD_LERROR, SAMP" refresh_interval must be a decimal number\n");
+                        rc = EINVAL;
+                        return rc;
+                }
+                conf.refresh_interval = (time_t)val;
+        } else {
+                conf.refresh_interval = (time_t)600;
+        }
+
         rc = ibmad_initialize();
         if (rc != 0) {
                 goto err;
@@ -769,11 +823,17 @@ err:
 
 static int sample(struct ldmsd_sampler *self)
 {
+        static time_t last_refresh = 0;
+        time_t current_time;
         int rc;
 
         log_fn(LDMSD_LDEBUG, SAMP" sample() called\n");
 
-        interfaces_tree_refresh();
+        current_time = time(NULL);
+        if (current_time >= last_refresh + conf.refresh_interval) {
+                interfaces_tree_refresh();
+                last_refresh = current_time;
+        }
         interfaces_tree_sample();
 
         return 0;
