@@ -65,7 +65,6 @@
 #include <ovis_json/ovis_json.h>
 #include "ldms.h"
 #include "ldmsd.h"
-#include "ldmsd_stream.h"
 
 #define PNAME "blob_stream_writer"
 
@@ -91,7 +90,7 @@ typedef struct stream_data {
 	char* offsetfile_name;
 	char* timingfile_name;
 	char* typefile_name;
-	ldmsd_stream_client_t subscription;
+	ldms_stream_client_t subscription;
 	/* set at first write */
 	FILE* offsetfile;
 	FILE* streamfile;
@@ -114,9 +113,9 @@ char blob_stream_char_to_type(char c)
 {
 	switch (c) {
 	case 's':
-		return LDMSD_STREAM_STRING;
+		return LDMS_STREAM_STRING;
 	case 'j':
-		return LDMSD_STREAM_JSON;
+		return LDMS_STREAM_JSON;
 		break;
 #if 0
 	case 'b':
@@ -128,12 +127,12 @@ char blob_stream_char_to_type(char c)
 	}
 }
 
-char blob_stream_type_to_char(ldmsd_stream_type_t stream_type)
+char blob_stream_type_to_char(ldms_stream_type_t stream_type)
 {
 	switch (stream_type) {
-	case LDMSD_STREAM_STRING:
+	case LDMS_STREAM_STRING:
 		return 's';
-	case LDMSD_STREAM_JSON:
+	case LDMS_STREAM_JSON:
 		return 'j';
 #if 0
 	case LDMSD_STREAM_BINARY:
@@ -147,13 +146,12 @@ char blob_stream_type_to_char(ldmsd_stream_type_t stream_type)
 }
 
 /* open, if not open or already closed, and write to stream files. */
-static int stream_cb(ldmsd_stream_client_t c, void *ctxt,
-		     ldmsd_stream_type_t stream_type,
-		     const char *msg, size_t msg_len,
-		     json_entity_t e)
+static int stream_cb(ldms_stream_event_t ev, void *ctxt)
 {
 	int rc = 0;
 	stream_data_t sd = ctxt;
+	if (ev->type != LDMS_STREAM_EVENT_RECV)
+		return 0;
 	if (!sd) {
 		msglog(LDMSD_LERROR, PNAME ": stream_cb ctxt is NULL\n");
 		return EINVAL;
@@ -191,7 +189,7 @@ static int stream_cb(ldmsd_stream_client_t c, void *ctxt,
 	}
 
 	if (sd->typefile) {
-		char st = blob_stream_type_to_char(stream_type);
+		char st = blob_stream_type_to_char(ev->recv.type);
 		rc = fwrite(&st, 1, 1, sd->typefile);
 		if (rc != 1) {
 			int ferr = ferror(sd->typefile);
@@ -199,15 +197,15 @@ static int stream_cb(ldmsd_stream_client_t c, void *ctxt,
 				sd->typefile_name, STRERROR(ferr));
 		}
 	}
-	rc = fwrite(msg, 1, msg_len, sd->streamfile);
+	rc = fwrite(ev->recv.data, 1, ev->recv.data_len, sd->streamfile);
 	sd->offset += rc;
-	if (rc != msg_len) {
+	if (rc != ev->recv.data_len) {
 		int ferr = ferror(sd->streamfile);
 		msglog(LDMSD_LERROR, PNAME ": short write starting at %s:%ld: %s\n",
 			sd->streamfile_name, sd->offset, STRERROR(ferr));
 	}
 	if (debug)
-		msglog(LDMSD_LDEBUG, PNAME ": msg=%.50s ...\n", msg);
+		msglog(LDMSD_LDEBUG, PNAME ": msg=%.50s ...\n", ev->recv.data);
 
 out:
 	pthread_mutex_unlock(&sd->write_lock);
@@ -399,8 +397,8 @@ static int set_paths(stream_data_t sd)
 	if (!sd->subscription) {
 		msglog(LDMSD_LDEBUG, PNAME ": subscribing to stream '%s'\n",
 			sd->stream_name);
-		sd->subscription = ldmsd_stream_subscribe(sd->stream_name,
-			stream_cb, sd);
+		sd->subscription = ldms_stream_subscribe(sd->stream_name, 0,
+			stream_cb, sd, "blob_stream_writer");
 		/* stream dispatch to stream_cb now holds a reference to sd. */
 	}
 	return 0;
@@ -558,7 +556,7 @@ static void stream_data_close( stream_data_t sd )
 	sd->offsetfile_name = NULL;
 	free(sd->stream_name);
 	sd->stream_name = NULL;
-	ldmsd_stream_close(sd->subscription);
+	ldms_stream_close(sd->subscription);
 	/* sd reference is no longer hiding inside cb handler */
 	sd->subscription = NULL;
 	sd->ws = WS_CLOSED;
