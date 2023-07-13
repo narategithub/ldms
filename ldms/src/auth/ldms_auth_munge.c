@@ -101,6 +101,7 @@ struct ldms_auth_munge {
 	struct ldms_auth base;
 	munge_ctx_t mctx;
 	char *local_cred;
+	int compat;
 	struct sockaddr_storage lsin;
 	struct sockaddr_storage rsin;
 	socklen_t sin_len;
@@ -110,7 +111,7 @@ static
 ldms_auth_t __auth_munge_new(ldms_auth_plugin_t plugin,
 		       struct attr_value_list *av_list)
 {
-	const char *munge_sock;
+	const char *value;
 	struct ldms_auth_munge *a;
 	munge_ctx_t mctx;
 	munge_err_t merr;
@@ -128,15 +129,19 @@ ldms_auth_t __auth_munge_new(ldms_auth_plugin_t plugin,
 		goto err1;
 	}
 
-	munge_sock = av_value(av_list, "socket");
-	if (munge_sock) {
-		merr = munge_ctx_set(mctx, MUNGE_OPT_SOCKET, munge_sock);
+	value = av_value(av_list, "socket");
+	if (value) {
+		merr = munge_ctx_set(mctx, MUNGE_OPT_SOCKET, value);
 		if (merr != EMUNGE_SUCCESS) {
 			LOG_ERROR("Failed to set MUNGE context. %s\n",
 				   munge_strerror(merr));
 			goto err2;
 		}
 	}
+
+	value = av_value(av_list, "compat");
+	if (value)
+		a->compat = atoi(value);
 
 	/* Test munge connection */
 	merr = munge_encode(&test_cred, mctx, NULL, 0);
@@ -196,6 +201,8 @@ int __auth_munge_xprt_bind(ldms_auth_t auth, ldms_t xprt)
 	return 0;
 }
 
+#define MUNGE_AUTH_MSG "MungeAuthenticate"
+
 static
 int __auth_munge_xprt_begin(ldms_auth_t auth, ldms_t xprt)
 {
@@ -203,26 +210,35 @@ int __auth_munge_xprt_begin(ldms_auth_t auth, ldms_t xprt)
 	munge_err_t merr;
 	int rc;
 	int len;
-	a->sin_len = sizeof(a->lsin);
-	rc = ldms_xprt_sockaddr(xprt, (void*)&a->lsin,
-				(void*)&a->rsin, &a->sin_len);
-	if (rc) {
-		LOG_ERROR("Failed to get the socket addresses. Error %d\n", rc);
-		return rc;
-	}
-	/*
-	 * zap_rdma from OVIS-4.3.7 and earlier has a bug that swaps
-	 * local/remote addresses. Since the old peers expect to receive the
-	 * swapped address, in order to be compatible with them, we have to send
-	 * the swapped address in the case of rdma transport.
-	 */
-	merr = (strncmp(xprt->name, "rdma", 4) == 0)?
-		munge_encode(&a->local_cred, a->mctx, &a->rsin, a->sin_len):
-		munge_encode(&a->local_cred, a->mctx, &a->lsin, a->sin_len);
 
+	if (a->compat) {
+		/*
+		 * This uses the older payload of the local/remote sin
+		 * to be compatabile with OVIS 4.3.11 and earlier
+		 */
+		a->sin_len = sizeof(a->lsin);
+		rc = ldms_xprt_sockaddr(xprt, (void*)&a->lsin,
+					(void*)&a->rsin, &a->sin_len);
+		if (rc) {
+			LOG_ERROR("Failed to get the socket addresses. Error %d\n", rc);
+			return rc;
+		}
+		/*
+		 * zap_rdma from OVIS-4.3.7 and earlier has a bug that swaps
+		 * local/remote addresses. Since the old peers expect to receive the
+		 * swapped address, in order to be compatible with them, we have to send
+		 * the swapped address in the case of rdma transport.
+		 */
+		merr = (strncmp(xprt->name, "rdma", 4) == 0)?
+			munge_encode(&a->local_cred, a->mctx, &a->rsin, a->sin_len):
+			munge_encode(&a->local_cred, a->mctx, &a->lsin, a->sin_len);
+	} else {
+		merr = munge_encode(&a->local_cred, a->mctx,
+				    MUNGE_AUTH_MSG, sizeof(MUNGE_AUTH_MSG));
+	}
 	if (merr) {
 		LOG_ERROR("munge_encode() failed. %s\n", munge_strerror(merr));
-		return EBADR; /* bad request */
+		return EBADR;
 	}
 	len = strlen(a->local_cred);
 	rc = ldms_xprt_auth_send(xprt, a->local_cred, len + 1);
@@ -242,22 +258,24 @@ int __auth_munge_xprt_recv_cb(ldms_auth_t auth, ldms_t xprt,
 	void *payload = NULL;
 	uid_t uid;
 	gid_t gid;
+	munge_err_t merr;
 	int len;
 	int cmp;
-	munge_err_t merr;
-	if (data[data_len-1] != 0)
-		goto invalid;
+	int rc = EINVAL;
+
 	merr = munge_decode(data, a->mctx, &payload, &len, &uid, &gid);
 	if (merr != EMUNGE_SUCCESS) {
 		LOG_ERROR("munge_decode() failed. %s\n", munge_strerror(merr));
-		goto invalid;
-	}
-	if (len != sizeof(*sin)) {
-		LOG_ERROR("Bad payload\n");
-		goto invalid; /* bad payload */
+		goto out;
 	}
 
-	/* check if addr match */
+	/* Check the authentication message */
+	if (0 == strcmp(payload, MUNGE_AUTH_MSG)) {
+		rc = 0;
+		goto out;
+	}
+
+	/* Check the expected peer address (compatability mode) */
 	sin = payload;
 	/*
 	 * zap_rdma from OVIS-4.3.7 and earlier has a bug that swaps
@@ -266,24 +284,20 @@ int __auth_munge_xprt_recv_cb(ldms_auth_t auth, ldms_t xprt,
 	 * swapped address in the case of rdma transport.
 	 */
 	cmp = (strncmp(xprt->name, "rdma", 4) == 0)?
-			memcmp(sin, &a->lsin, sizeof(*sin)):
-			memcmp(sin, &a->rsin, sizeof(*sin));
+		memcmp(sin, &a->lsin, sizeof(*sin)):
+		memcmp(sin, &a->rsin, sizeof(*sin));
 	if (cmp != 0) {
-		LOG_ERROR("bad address.\n");
-		goto invalid; /* bad addr */
+		LOG_ERROR("Unexpected authentication message payload.\n");
+		goto out;
 	}
-	/* verified */
+	/* Cache the peer's verified uid and gid in the transport handle. */
 	xprt->ruid = uid;
 	xprt->rgid = gid;
+	rc = 0;
 
+ out:
 	free(payload);
-	ldms_xprt_auth_end(xprt, 0);
-	return 0;
-
-invalid:
-	if (payload)
-		free(payload);
-	ldms_xprt_auth_end(xprt, EINVAL);
+	ldms_xprt_auth_end(xprt, rc);
 	return 0;
 }
 
@@ -310,7 +324,7 @@ int __auth_munge_cred_get(ldms_auth_t auth, ldms_cred_t cred)
 ldms_auth_plugin_t __ldms_auth_plugin_get()
 {
 	if (!munge_log) {
-		munge_log = ovis_log_register("auth_munge",
+		munge_log = ovis_log_register("auth.munge",
 					      "Messages for ldms_auth_munge");
 		if (!munge_log) {
 			LOG_ERROR("Failed to register auth_munge's log. "
