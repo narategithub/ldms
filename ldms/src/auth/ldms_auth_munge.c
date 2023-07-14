@@ -290,12 +290,14 @@ int __auth_munge_xprt_recv_cb(ldms_auth_t auth, ldms_t xprt,
 		LOG_ERROR("Unexpected authentication message payload.\n");
 		goto out;
 	}
-	/* Cache the peer's verified uid and gid in the transport handle. */
-	xprt->ruid = uid;
-	xprt->rgid = gid;
 	rc = 0;
 
  out:
+	if (!rc) {
+		/* Cache the peer's verified uid and gid in the transport handle. */
+		xprt->ruid = uid;
+		xprt->rgid = gid;
+	}
 	free(payload);
 	ldms_xprt_auth_end(xprt, rc);
 	return 0;
