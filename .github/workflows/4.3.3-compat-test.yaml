@@ -153,12 +153,12 @@ jobs:
         echo -n "ldms_ls agg-4 ... "
         D1=$( ./ldms_ls.sh -x sock -p 10002 )
         echo "result: ${D1}"
-        [[ "${D0}" = "ovis-4.3.3/meminfo" ]] || error "unexpected ldms_ls agg-4.3.3 result"
-        [[ "${D1}" = "ovis-4.3.3/meminfo" ]] || error "unexpected ldms_ls agg-4 result"
         # ldms_ls-4.3.3 to agg-4
         echo -n "ldms_ls(4.3.3) agg-4 ... "
         D2=$( ./ldms_ls-4.3.3.sh -x sock -p 10002 )
         echo "result: ${D2}"
+        [[ "${D0}" = "ovis-4.3.3/meminfo" ]] || error "unexpected ldms_ls agg-4.3.3 result"
+        [[ "${D1}" = "ovis-4.3.3/meminfo" ]] || error "unexpected ldms_ls agg-4 result"
         [[ "${D2}" = "ovis-4.3.3/meminfo" ]] || error "unexpected ldms_ls(4.3.3) agg-4 result"
         # ldms_ls-4 to agg-4.3.3 -l
         echo -n "ldms_ls -l agg-4.3.3 ... "
@@ -247,7 +247,7 @@ jobs:
         sleep 10
         # agg2
         echo "starting agg-4 w/munge"
-        ./ldmsd-4.sh -c agg-4.conf -l logs/agg-4.log -v INFO -x sock:10002 -a munge
+        ./ldmsd-4.sh -c agg-4.conf -l logs/agg-4.log -v INFO -x sock:10002 -a munge -A compat=1
         sleep 10
         # check that they're running
         SAMP_433_PID=$(pgrep -f samp-4.3.3.conf)
@@ -260,28 +260,28 @@ jobs:
         [[ -n "${AGG_433_PID}" ]] || error "agg-4.3.3 is not running"
         [[ -n "${AGG_4_PID}" ]] || error "agg-4 is not running"
         # ldms_ls-4 to agg-4.3.3
-        echo -n "ldms_ls agg-4.3.3 -a munge ... "
-        D0=$( ./ldms_ls.sh -x sock -p 10001 -a munge )
+        echo -n "ldms_ls agg-4.3.3 -a munge -A compat=1 ... "
+        D0=$( ./ldms_ls.sh -x sock -p 10001 -a munge -A compat=1 )
         echo "result: ${D0}"
         # ldms_ls-4 to agg-4
-        echo -n "ldms_ls agg-4 -a munge ... "
-        D1=$( ./ldms_ls.sh -x sock -p 10002 -a munge )
+        echo -n "ldms_ls agg-4 -a munge -A compat=1 ... "
+        D1=$( ./ldms_ls.sh -x sock -p 10002 -a munge -A compat=1 )
         echo "result: ${D1}"
-        [[ "${D0}" = "ovis-4.3.3/meminfo" ]] || error "unexpected ldms_ls agg-4.3.3 result"
-        [[ "${D1}" = "ovis-4.3.3/meminfo" ]] || error "unexpected ldms_ls agg-4 result"
         # ldms_ls-4.3.3 to agg-4
         echo -n "ldms_ls(4.3.3) agg-4 -a munge ... "
         D2=$( ./ldms_ls-4.3.3.sh -x sock -p 10002 -a munge )
         echo "result: ${D2}"
+        [[ "${D0}" = "ovis-4.3.3/meminfo" ]] || error "unexpected ldms_ls agg-4.3.3 result"
+        [[ "${D1}" = "ovis-4.3.3/meminfo" ]] || error "unexpected ldms_ls agg-4 result"
         [[ "${D2}" = "ovis-4.3.3/meminfo" ]] || error "unexpected ldms_ls(4.3.3) agg-4 result"
         # ldms_ls-4 to agg-4.3.3 -l
-        echo -n "ldms_ls -l agg-4.3.3 -a munge ... "
-        D0=$( ./ldms_ls.sh -l -x sock -p 10001 -a munge | grep MemTotal )
+        echo -n "ldms_ls -l agg-4.3.3 -a munge -A compat=1 ... "
+        D0=$( ./ldms_ls.sh -l -x sock -p 10001 -a munge -A compat=1 | grep MemTotal )
         echo "${D0}"
         [[ -n "${D0}" ]] || error "cannot get MemTotal from ldms_ls -l"
         # ldms_ls-4 to agg-4 -l
-        echo -n "ldms_ls -l agg-4 -a munge ... "
-        D1=$( ./ldms_ls.sh -l -x sock -p 10002 -a munge | grep MemTotal )
+        echo -n "ldms_ls -l agg-4 -a munge -A compat=1 ... "
+        D1=$( ./ldms_ls.sh -l -x sock -p 10002 -a munge -A compat=1 | grep MemTotal )
         echo "${D1}"
         [[ -n "${D1}" ]] || error "cannot get MemTotal from ldms_ls -l"
         # ldms_ls-4.3.3 to agg-4 -l
@@ -303,15 +303,15 @@ jobs:
         ps ax | grep ldmsd
         echo "---------------"
         # ldms_ls to agg-4.3.3
-        echo -n "ldms_ls agg-4.3.3 -a munge ... "
-        D0=$(./ldms_ls.sh -x sock -p 10001 -a munge )
+        echo -n "ldms_ls agg-4.3.3 -a munge -A compat=1 ... "
+        D0=$(./ldms_ls.sh -x sock -p 10001 -a munge -A compat=1 )
         [[ -z "${D0}" ]] && echo "dir(agg-4.3.3) is empty (good)" || error "ERROR: dir(agg-4.3.3) is not empty"
         # check aggregators
         ps_check agg-4.3.3 ${AGG_433_PID}
         ps_check agg-4 ${AGG_4_PID}
         # ldms_ls to agg-4
-        echo -n "ldms_ls agg-4 -a munge ... "
-        D1=$(./ldms_ls.sh -x sock -p 10002 -a munge )
+        echo -n "ldms_ls agg-4 -a munge -A compat=1 ... "
+        D1=$(./ldms_ls.sh -x sock -p 10002 -a munge -A compat=1 )
         [[ -z "${D1}" ]] && echo "dir(agg-4) is empty (good)" || error "ERROR: dir(agg-4) is not empty"
         echo "DONE!"
     - name: enum compatibility check
