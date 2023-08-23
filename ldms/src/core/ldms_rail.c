@@ -1352,12 +1352,17 @@ const char *sockaddr_ntop(struct sockaddr *sa, char *buff, size_t sz)
 	union ldms_sockaddr *lsa = (void*)sa;
 	char tmp[128];
 	switch (sa->sa_family) {
+	case 0:
+		snprintf(buff, sz, "0.0.0.0:0");
+		break;
 	case AF_INET:
 		inet_ntop(AF_INET, &lsa->sin.sin_addr, tmp, sizeof(tmp));
 		snprintf(buff, sz, "%s:%d", tmp, ntohs(lsa->sin.sin_port));
+		break;
 	case AF_INET6:
 		inet_ntop(AF_INET6, &lsa->sin6.sin6_addr, tmp, sizeof(tmp));
-		snprintf(buff, sz, "%s:%d", tmp, ntohs(lsa->sin6.sin6_port));
+		snprintf(buff, sz, "[%s]:%d", tmp, ntohs(lsa->sin6.sin6_port));
+		break;
 	default:
 		snprintf(buff, sz, "__UNSUPPORTED__");
 	}
@@ -1368,12 +1373,17 @@ const char *ldms_addr_ntop(struct ldms_addr *addr, char *buff, size_t sz)
 {
 	char tmp[128];
 	switch (addr->sa_family) {
+	case 0:
+		snprintf(buff, sz, "0.0.0.0:0");
+		break;
 	case AF_INET:
 		inet_ntop(AF_INET, &addr->addr, tmp, sizeof(tmp));
 		snprintf(buff, sz, "%s:%d", tmp, ntohs(addr->sin_port));
+		break;
 	case AF_INET6:
 		inet_ntop(AF_INET6, &addr->addr, tmp, sizeof(tmp));
-		snprintf(buff, sz, "%s:%d", tmp, ntohs(addr->sin_port));
+		snprintf(buff, sz, "[%s]:%d", tmp, ntohs(addr->sin_port));
+		break;
 	default:
 		snprintf(buff, sz, "__UNSUPPORTED__");
 	}

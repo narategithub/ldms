@@ -1582,6 +1582,7 @@ int __stream_stats_sources_buff_append(struct ldms_stream_stats_s *stats,
 	struct ldms_stream_src_stats_s *src;
 	struct ldms_addr addr;
 	char addr_buff[128] = "";
+	const char *sep = "";
 	rc = ovis_buff_appendf(buff, "{");
 	if (rc)
 		goto out;
@@ -1589,7 +1590,13 @@ int __stream_stats_sources_buff_append(struct ldms_stream_stats_s *stats,
 		src = container_of(rbn, struct ldms_stream_src_stats_s, rbn);
 		addr = src->src;
 		ldms_addr_ntop(&addr, addr_buff, sizeof(addr_buff));
+		rc = ovis_buff_appendf(buff, "%s\"%s\":",sep, addr_buff);
+		if (rc)
+			goto out;
 		rc = __src_stats_buff_append(src, buff);
+		if (rc)
+			goto out;
+		sep = ",";
 	}
 	rc = ovis_buff_appendf(buff, "}");
  out:
