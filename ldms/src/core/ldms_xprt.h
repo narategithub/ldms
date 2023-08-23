@@ -203,13 +203,7 @@ struct ldms_cancel_push_cmd_param {
 
 /* partial stream message; see ldms_stream.h for a full stream message */
 struct ldms_stream_part_msg_param {
-	union {
-		uint64_t src;
-		struct {
-			uint32_t src_addr;
-			uint32_t src_port;
-		};
-	};
+	struct ldms_addr src;
 	uint64_t msg_gn;
 	uint32_t more:1; /* more partial message */
 	uint32_t first:1; /* first partial message */
@@ -406,6 +400,14 @@ typedef enum ldms_xtype_e {
 #define XTYPE_IS_PASSIVE(t) ((t) & 0x1)
 #define XTYPE_IS_LEGACY(t) (((t) & (~0x1)) == 0)
 #define XTYPE_IS_RAIL(t) ((t) & 0x2)
+
+/* A convenient sockaddr union for IPv4 and IPv6 */
+union ldms_sockaddr {
+	struct sockaddr     sa;
+	struct sockaddr_in  sin;
+	struct sockaddr_in6 sin6;
+	struct sockaddr_storage storage;
+};
 
 struct ldms_xprt_ops_s {
 	int (*connect)(ldms_t x, struct sockaddr *sa, socklen_t sa_len,
