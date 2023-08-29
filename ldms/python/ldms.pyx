@@ -3763,7 +3763,7 @@ cdef class LdmsAddr(object):
             return LdmsAddr(AF_INET, be16toh(sin.sin_port), addr[:4])
         elif sa.sa_family == AF_INET6:
             addr = <char*>&sin6.sin6_addr
-            return LdmsAddr(AF_INET, be16toh(sin6.sin6_port), addr[:16])
+            return LdmsAddr(AF_INET6, be16toh(sin6.sin6_port), addr[:16])
         elif sa.sa_family == 0:
             return LdmsAddr(0, 0, b'\x00'*16)
         else:

@@ -975,6 +975,48 @@ int ldms_xprt_rail_eps(ldms_t x);
  */
 int ldms_xprt_rail_send_credit_get(ldms_t x, uint64_t *credits, int n);
 
+/* A convenient sockaddr union for IPv4 and IPv6 (for now) */
+union ldms_sockaddr {
+	struct sockaddr     sa;
+	struct sockaddr_in  sin;
+	struct sockaddr_in6 sin6;
+	struct sockaddr_storage storage;
+};
+
+/**
+ * A utility to convert \c host, \c port/service to \c sockaddr.
+ *
+ * \c host could be:
+ * - "IP4_ADDR", e.g. "192.168.0.5"
+ * - "IP6_ADDR", e.g. "::1"
+ * - "HOSTNAME", e.g. "node05"
+ *
+ * \note It is recommended to supply \c sockaddr_storage structure for \c sa.
+ *
+ * \param         host   The host string.
+ * \param         port   The port or service string (see \c getaddrinfo(3)).
+ * \param[out]    sa     The sockaddr output buffer. It is recommended to
+ *                       supply \c sockaddr_storage structure for \c sa.
+ * \param[in,out] sa_len The length of the \c sa buffer. On return, \c sa_len
+ *                       is set to the length of the returned \c sa.
+ *
+ * \retval 0 If there is no error.
+ */
+int ldms_getsockaddr(const char *host, const char *port,
+		     struct sockaddr *sa, socklen_t *sa_len);
+
+/**
+ * Same as \c ldms_getsockaddr(), but only returns AF_INET4 family.
+ */
+int ldms_getsockaddr4(const char *host, const char *port,
+		      struct sockaddr *sa, socklen_t *sa_len);
+
+/**
+ * Same as \c ldms_getsockaddr(), but only returns AF_INET6 family.
+ */
+int ldms_getsockaddr6(const char *host, const char *port,
+		      struct sockaddr *sa, socklen_t *sa_len);
+
 /** \} */
 
 /**

@@ -401,14 +401,6 @@ typedef enum ldms_xtype_e {
 #define XTYPE_IS_LEGACY(t) (((t) & (~0x1)) == 0)
 #define XTYPE_IS_RAIL(t) ((t) & 0x2)
 
-/* A convenient sockaddr union for IPv4 and IPv6 */
-union ldms_sockaddr {
-	struct sockaddr     sa;
-	struct sockaddr_in  sin;
-	struct sockaddr_in6 sin6;
-	struct sockaddr_storage storage;
-};
-
 struct ldms_xprt_ops_s {
 	int (*connect)(ldms_t x, struct sockaddr *sa, socklen_t sa_len,
 			ldms_event_cb_t cb, void *cb_arg);
