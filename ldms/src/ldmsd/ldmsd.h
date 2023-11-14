@@ -60,6 +60,7 @@
 #include <pthread.h>
 
 #include <sys/time.h>
+#include <jansson.h>
 
 #include <ovis_event/ovis_event.h>
 #include <ovis_util/util.h>
@@ -494,7 +495,6 @@ struct ldmsd_strgp {
 
 typedef struct ldmsd_req_ctxt *ldmsd_req_ctxt_t;
 typedef struct ldmsd_decomp_s *ldmsd_decomp_t;
-typedef struct json_entity_s *json_entity_t;
 
 /** Decomposition interface. */
 struct ldmsd_decomp_s {
@@ -513,7 +513,7 @@ struct ldmsd_decomp_s {
 	 * \retval NULL   If there is an error. In this case, \c errno must also
 	 *                be set to describe the error.
 	 */
-	ldmsd_decomp_t (*config)(ldmsd_strgp_t strgp, json_entity_t jcfg, ldmsd_req_ctxt_t reqc);
+	ldmsd_decomp_t (*config)(ldmsd_strgp_t strgp, json_t *jcfg, ldmsd_req_ctxt_t reqc);
 
 	/**
 	 * Decompose method.
@@ -549,22 +549,22 @@ struct ldmsd_decomp_s {
 
 /*
  * Phony metric IDs are used in `struct ldmsd_col_s` construction when the
- * value of the column refers to a non-metric set data such as:
+ * value of the column refers to a metric set's meta-data:
  *   - timestamp
  *   - producer
  *   - instance
  */
 typedef enum ldmsd_phony_metric_id {
-	LDMSD_PHONY_METRIC_ID_FIRST = 65536,
-	LDMSD_PHONY_METRIC_ID_TIMESTAMP = LDMSD_PHONY_METRIC_ID_FIRST,
-	LDMSD_PHONY_METRIC_ID_PRODUCER,
-	LDMSD_PHONY_METRIC_ID_INSTANCE,
+	LDMSD_META_METRIC_ID_FIRST = 65536,
+	LDMSD_META_METRIC_ID_TIMESTAMP = LDMSD_META_METRIC_ID_FIRST,
+	LDMSD_META_METRIC_ID_PRODUCER,
+	LDMSD_META_METRIC_ID_INSTANCE,
 } ldmsd_phony_metric_id_t;
 
 __attribute__((unused)) /* compiler hush */
-static int is_phony_metric_id(int metric_id)
+static int ldmsd_is_meta_metric_id(int metric_id)
 {
-	return metric_id >= LDMSD_PHONY_METRIC_ID_FIRST;
+	return metric_id >= LDMSD_META_METRIC_ID_FIRST;
 }
 
 struct ldmsd_col_s {
@@ -699,6 +699,8 @@ char *ldmsd_avro_name_get(const char *ldms_name);
  * \retval errno If there is an error.
  */
 int ldmsd_decomp_config(ldmsd_strgp_t strgp, const char *json_path, ldmsd_req_ctxt_t reqc);
+
+ldmsd_decomp_t ldmsd_decomp_get(const char *decomp, ldmsd_req_ctxt_t reqc);
 
 /* ---------------------- */
 

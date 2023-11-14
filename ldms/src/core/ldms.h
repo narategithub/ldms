@@ -2983,7 +2983,7 @@ void ldms_metric_array_set_val(ldms_set_t s,
 
 
 /**
- * \brief Tell arrayness of metric.
+ * \brief Return 1 if metric is an array
  *
  * \param s		The set handle.
  * \param metric_idx	The metric index

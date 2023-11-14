@@ -2701,7 +2701,7 @@ static int __handle_cmd(struct ldmsctl_ctrl *ctrl, char *cmd_str)
 	if ((0 == strcmp(key.token, "prdcr_add")) ||
 			(0 == strncmp(key.token, "prdcr_start", 11))) {
 		if (strstr(cmd_str, "interval")) {
-			printf("'interval' is begin deprecated. Please use 'reconnect' in the future.\n");
+			printf("'interval' is deprecated. Please use 'reconnect' in the future.\n");
 		}
 	}
 

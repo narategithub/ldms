@@ -62,6 +62,7 @@
 #include <openssl/sha.h>
 
 #include "ovis_json/ovis_json.h"
+#include <jansson.h>
 #include "coll/rbt.h"
 
 #include "ldmsd.h"
@@ -75,36 +76,6 @@ enum ldmsd_decomp_type_e {
 	LDMSD_DECOMP_STATIC,
 	LDMSD_DECOMP_AS_IS,
 };
-
-/* ==== JSON helpers ==== */
-
-static json_entity_t __jdict_ent(json_entity_t dict, const char *key)
-{
-	json_entity_t attr;
-	json_entity_t val;
-
-	attr = json_attr_find(dict, key);
-	if (!attr) {
-		errno = ENOKEY;
-		return NULL;
-	}
-	val = json_attr_value(attr);
-	return val;
-}
-
-/* Access dict[key], expecting it to be a str */
-static json_str_t __jdict_str(json_entity_t dict, const char *key)
-{
-	json_entity_t val;
-
-	val = __jdict_ent(dict, key);
-	if (!val || val->type != JSON_STRING_VALUE) {
-		errno = EINVAL;
-		return NULL;
-	}
-	return val->value.str_;
-}
-
 
 /* ==== generic decomp ==== */
 /* convenient macro to put error message in both ldmsd log and `reqc` */
@@ -226,14 +197,10 @@ ldmsd_decomp_t ldmsd_decomp_get(const char *decomp, ldmsd_req_ctxt_t reqc)
 /* protected by strgp lock */
 int ldmsd_decomp_config(ldmsd_strgp_t strgp, const char *json_path, ldmsd_req_ctxt_t reqc)
 {
-	json_str_t s;
-	json_entity_t cfg;
-	int fd, rc;
-	off_t off;
-	size_t sz;
-	json_parser_t jp = NULL;
-	char *buff = NULL;
+	int rc;
 	ldmsd_decomp_t decomp_api;
+	json_error_t error;
+	json_t *cfg, *type;
 
 	if (strgp->decomp) {
 		/* already configured */
@@ -242,84 +209,58 @@ int ldmsd_decomp_config(ldmsd_strgp_t strgp, const char *json_path, ldmsd_req_ct
 		goto err_0;
 	}
 
-	/* Load JSON from file */
-	fd = open(json_path, O_RDONLY);
-	if (fd < 0) {
-		rc = errno;
-		DECOMP_ERR(reqc, errno, "open error %d, file: %s\n",
-			   errno, json_path);
+	/* Load configuration from JSON encoded file */
+	cfg = json_load_file(json_path, 0, &error);
+	if (!cfg) {
+		char err_str[4096];
+		snprintf(err_str, sizeof(err_str),
+			 "Configuration file syntax error: "
+			 "line %d, column %d \"%s\"",
+			 error.line, error.column, error.text);
+		DECOMP_ERR(reqc, EINVAL, "%s\n", err_str);
+		rc = EINVAL;
 		goto err_0;
 	}
-	off = lseek(fd, 0, SEEK_END);
-	if (off == -1) {
-		rc = errno;
-		DECOMP_ERR(reqc, errno, "seek failed, errno: %d\n", errno);
-		goto err_1;
-	}
-	sz = off;
-	buff = malloc(sz + 1);
-	if (!buff) {
-		rc = errno;
-		DECOMP_ERR(reqc, errno, "not enough memory");
-		goto err_1;
-	}
-	off = lseek(fd, 0, SEEK_SET);
-	if (off == -1) {
-		rc = errno;
-		DECOMP_ERR(reqc, errno, "seek failed, errno: %d\n", errno);
-		goto err_2;
-	}
-	jp = json_parser_new(0);
-	if (!jp) {
-		rc = errno;
-		DECOMP_ERR(reqc, errno, "cannot create json parser, error: %d\n", errno);
-		goto err_2;
-	}
-	off = read(fd, buff, sz);
-	if (off != sz) {
-		rc = errno;
-		DECOMP_ERR(reqc, errno, "read failed, error: %d\n", errno);
-		goto err_2;
-	}
-	buff[sz] = '\0';
-	rc = json_parse_buffer(jp, buff, sz, &cfg);
-	if (rc) {
-		DECOMP_ERR(reqc, rc, "json parse error: %d\n", rc);
-		errno = rc;
-		goto err_3;
+
+	if (!json_is_object(cfg)) {
+		rc = EINVAL;
+		DECOMP_ERR(reqc, EINVAL,
+			   "decomposer: the configuration file must "
+			   "contain a JSON object.\n");
+		goto err_0;
 	}
 
 	/* Configure decomposer */
-	s = __jdict_str(cfg, "type");
-	if (!s) {
+	type = json_object_get(cfg, "type");
+	if (!type || !json_is_string(type)) {
 		rc = errno = EINVAL;
-		DECOMP_ERR(reqc, EINVAL, "decomposer: 'type' attribute is missing.\n");
-		goto err_4;
+		DECOMP_ERR(reqc, EINVAL,
+			   "decomposer: 'type' attribute must be "
+			   "present and a string.\n");
+		goto err_0;
 	}
-	decomp_api = __decomp_get(s->str, reqc);
+	decomp_api = __decomp_get(json_string_value(type), reqc);
 	if (!decomp_api) {
-		rc = errno;
-		goto err_4;
+		rc = errno = EINVAL;
+		DECOMP_ERR(reqc, ENOENT,
+			   "decomposer: The specified type('%s') "
+			   "was not found.\n",
+			   json_string_value(type));
+		goto err_0;
 	}
 	strgp->decomp = decomp_api->config(strgp, cfg, reqc);
 	if (!strgp->decomp) {
 		rc = errno;
-		goto err_4;
+		goto err_0;
 	}
 
 	/* decomp config success! */
 	rc = 0;
 
 	/* let-through, clean-up */
- err_4:
-	json_entity_free(cfg);
- err_3:
-	json_parser_free(jp);
- err_2:
-	free(buff);
- err_1:
-	close(fd);
  err_0:
+	if (cfg)
+		json_decref(cfg);
 	return rc;
 }
 

@@ -58,7 +58,7 @@
 
 #include <openssl/sha.h>
 
-#include "ovis_json/ovis_json.h"
+#include <jansson.h>
 #include "coll/rbt.h"
 
 #include "ldmsd.h"
@@ -67,11 +67,11 @@
 static ovis_log_t mylog;
 
 static ldmsd_decomp_t __decomp_as_is_config(ldmsd_strgp_t strgp,
-			json_entity_t cfg, ldmsd_req_ctxt_t reqc);
+			json_t *cfg, ldmsd_req_ctxt_t reqc);
 static int __decomp_as_is_decompose(ldmsd_strgp_t strgp, ldms_set_t set,
-				     ldmsd_row_list_t row_list, int *row_count);
+				    ldmsd_row_list_t row_list, int *row_count);
 static void __decomp_as_is_release_rows(ldmsd_strgp_t strgp,
-					 ldmsd_row_list_t row_list);
+					ldmsd_row_list_t row_list);
 static void __decomp_as_is_release_decomp(ldmsd_strgp_t strgp);
 
 struct ldmsd_decomp_s __decomp_as_is = {
@@ -90,52 +90,6 @@ ldmsd_decomp_t get()
 					   "Error %d.\n", errno);
 	}
 	return &__decomp_as_is;
-}
-
-/* ==== JSON helpers ==== */
-
-static json_entity_t __jdict_ent(json_entity_t dict, const char *key)
-{
-	json_entity_t attr;
-	json_entity_t val;
-
-	attr = json_attr_find(dict, key);
-	if (!attr) {
-		errno = ENOKEY;
-		return NULL;
-	}
-	val = json_attr_value(attr);
-	return val;
-}
-
-/* Access dict[key], expecting it to be a list */
-static json_list_t __jdict_list(json_entity_t dict, const char *key)
-{
-	json_entity_t val;
-
-	val = __jdict_ent(dict, key);
-	if (!val)
-		return NULL;
-	if (val->type != JSON_LIST_VALUE) {
-		errno = EINVAL;
-		return NULL;
-	}
-	return val->value.list_;
-}
-
-/* Access dict[key], expecting it to be a str */
-static json_str_t __jdict_str(json_entity_t dict, const char *key)
-{
-	json_entity_t val;
-
-	val = __jdict_ent(dict, key);
-	if (!val)
-		return NULL;
-	if (val->type != JSON_STRING_VALUE) {
-		errno = EINVAL;
-		return NULL;
-	}
-	return val->value.str_;
 }
 
 /* ==== generic decomp ==== */
@@ -235,22 +189,28 @@ __decomp_as_is_release_decomp(ldmsd_strgp_t strgp)
 }
 
 static ldmsd_decomp_t
-__decomp_as_is_config(ldmsd_strgp_t strgp, json_entity_t jcfg,
+__decomp_as_is_config(ldmsd_strgp_t strgp, json_t *jcfg,
 		      ldmsd_req_ctxt_t reqc)
 {
-	json_str_t jname;
-	json_list_t jidxs, jidx_cols;
-	json_entity_t jidx, jidx_col;
+	json_t *jval;
+	json_t *jidxs, *jidx_cols, *jidx, *jidx_col;
 	__decomp_as_is_cfg_t dcfg = NULL;
 	__decomp_index_t didx;
 	int j, k, n_idx;
 
 	/* indices */
-	jidxs = __jdict_list(jcfg, "indices");
+	jidxs = json_object_get(jcfg, "indices");
 	if (!jidxs) {
 		n_idx = 0;
 	} else {
-		n_idx = jidxs->item_count;
+		if (!json_is_array(jidxs)) {
+			DECOMP_ERR(reqc, EINVAL,
+				   "strgp '%s': The 'indices' section must be "
+				   "an array.\n",
+				   strgp->obj.name);
+			goto out;
+		}
+		n_idx = json_array_size(jidxs);
 	}
 	dcfg = calloc(1, sizeof(*dcfg) + n_idx * sizeof(dcfg->idxs[0]));
 	if (!dcfg)
@@ -262,53 +222,53 @@ __decomp_as_is_config(ldmsd_strgp_t strgp, json_entity_t jcfg,
 		goto out;
 
 	/* foreach index */
-	j = 0;
-	TAILQ_FOREACH(jidx, &jidxs->item_list, item_entry) {
+	json_array_foreach(jidxs, j, jidx) {
 		didx = &dcfg->idxs[j];
-		if (jidx->type != JSON_DICT_VALUE) {
-			DECOMP_ERR(reqc, EINVAL, "strgp '%s': index '%d': "
-					"an index entry must be a dictionary.\n",
-					strgp->obj.name, j);
+		if (!json_is_object(jidx)) {
+			DECOMP_ERR(reqc, EINVAL,
+				   "strgp '%s': index '%d': "
+				   "an index entry must be a dictionary.\n",
+				   strgp->obj.name, j);
 			goto err_0;
 		}
-		jname = __jdict_str(jidx, "name");
-		if (!jname) {
-			DECOMP_ERR(reqc, EINVAL, "strgp '%s': index '%d': "
-					"index['name'] is required.\n",
-					strgp->obj.name, j);
+		jval = json_object_get(jidx, "name");
+		if (!json_is_string(jval)) {
+			DECOMP_ERR(reqc, EINVAL,
+				   "strgp '%s': index '%d': "
+				   "index['name'] is required and must be a string.\n",
+				   strgp->obj.name, j);
 			goto err_0;
 		}
-		didx->name = strdup(jname->str);
+		didx->name = strdup(json_string_value(jval));
 		if (!didx->name)
 			goto err_enomem;
-		jidx_cols = __jdict_list(jidx, "cols");
-		if (!jidx_cols) {
-			DECOMP_ERR(reqc, EINVAL, "strgp '%s': index '%d': "
-					"index['cols'] is required.\n",
-					strgp->obj.name, j);
+
+		jidx_cols = json_object_get(jidx, "cols");
+		if (!json_is_array(jidx_cols)) {
+			DECOMP_ERR(reqc, EINVAL,
+				   "strgp '%s': index '%d': "
+				   "index['cols'] is required and must be an array.\n",
+				   strgp->obj.name, j);
 			goto err_0;
 		}
-		didx->col_count = jidx_cols->item_count;
-		didx->col_names = calloc(1, didx->col_count*sizeof(didx->col_names[0]));
+		didx->col_count = json_array_size(jidx_cols);
+		didx->col_names = calloc(1, didx->col_count * sizeof(didx->col_names[0]));
 		if (!didx->col_names)
 			goto err_enomem;
-		k = 0;
-		TAILQ_FOREACH(jidx_col, &jidx_cols->item_list, item_entry) {
-			if (jidx_col->type != JSON_STRING_VALUE) {
-				DECOMP_ERR(reqc, EINVAL, "strgp '%s': index '%d':"
-						"index['cols'][%d] must be a string.\n",
-						strgp->obj.name, j, k);
+
+		json_array_foreach(jidx_cols, k, jidx_col) {
+			if (!json_is_string(jidx_col)) {
+				DECOMP_ERR(reqc, EINVAL,
+					   "strgp '%s': index '%d':"
+					   "index['cols'][%d] must be a string.\n",
+					   strgp->obj.name, j, k);
 				goto err_0;
 			}
-			didx->col_names[k] = strdup(jidx_col->value.str_->str);
+			didx->col_names[k] = strdup(json_string_value(jidx_col));
 			if (!didx->col_names[k])
 				goto err_enomem;
-			k++;
 		}
-		assert(k == didx->col_count);
-		j++;
 	}
-	assert(j == jidxs->item_count);
  out:
 
 	return &dcfg->decomp;
@@ -439,7 +399,7 @@ __get_row_cfg(__decomp_as_is_cfg_t dcfg, ldms_set_t set)
 
 	/* create timestamp column */
 	dcol = &drow->cols[0];
-	dcol->set_mid = LDMSD_PHONY_METRIC_ID_TIMESTAMP;
+	dcol->set_mid = LDMSD_META_METRIC_ID_TIMESTAMP;
 	dcol->array_len = 1;
 	dcol->rec_mid = -1;
 	dcol->col_type = LDMS_V_TIMESTAMP;
@@ -696,12 +656,12 @@ static int __decomp_as_is_decompose(ldmsd_strgp_t strgp, ldms_set_t set,
 		assert(mid >= 0);
 		mcol->le = NULL;
 
-		if (mid == LDMSD_PHONY_METRIC_ID_TIMESTAMP) {
+		if (mid == LDMSD_META_METRIC_ID_TIMESTAMP) {
 			/* mcol->mval will be assigned in `make_row` */
 			continue;
 		}
 
-		assert(mid < LDMSD_PHONY_METRIC_ID_FIRST);
+		assert(mid < LDMSD_META_METRIC_ID_FIRST);
 
 		mcol->set_mval = ldms_metric_get(set, mid);
 		mtype = ldms_metric_type_get(set, mid);
@@ -825,7 +785,7 @@ static int __decomp_as_is_decompose(ldmsd_strgp_t strgp, ldms_set_t set,
 		col->name = dcol->name;
 		col->type = dcol->col_type;
 		col->array_len = mcol->col_mlen;
-		if (dcol->set_mid == LDMSD_PHONY_METRIC_ID_TIMESTAMP) {
+		if (dcol->set_mid == LDMSD_META_METRIC_ID_TIMESTAMP) {
 			phony->v_ts = ts;
 			col->mval = phony;
 		} else {
