@@ -1,0 +1,131 @@
+{
+  "type": "flex",
+  "decomposition": {
+    "vmstat": {
+      "type": "static",
+      "rows": [
+        {
+          "schema": "vmstat_tom",
+          "cols": [
+              { "src":"timestamp" },
+	      { "src":"producer" },
+              { "src":"instance" },
+              { "src":"component_id" },
+              { "src":"job_id" },
+              { "src":"nr_active_file" },
+	      { "src":"nr_zone_active_anon" },
+              { "src":"nr_free_pages" }
+          ],
+          "indices": [
+            { "name":"job_comp_time", "cols":["job_id", "component_id", "timestamp"] },
+            { "name":"timestamp", "cols":["timestamp"] }
+          ]
+        }
+      ]
+    },
+    "meminfo": {
+      "type": "static",
+      "rows": [
+        {
+          "schema": "meminfo_tom",
+          "cols": [
+            { "src":"timestamp" },
+            { "src":"producer" },
+            { "src":"instance" },
+            { "src":"component_id" },
+            { "src":"job_id" },
+            { "src":"MemFree" },
+            { "src":"MemAvailable" },
+            { "src":"Active" },
+            { "src":"MemTotal" }
+          ],
+          "indices": [
+            { "name":"job_comp_time", "cols":["job_id", "component_id", "timestamp"] },
+            { "name":"timestamp", "cols":["timestamp"] }
+          ]
+        }
+      ]
+    },
+    "procstat" : {
+      "type" : "static",
+      "rows": [
+        {
+          "schema": "procstat_tom",
+          "cols": [
+              { "src":"timestamp" },
+              { "src":"component_id" },
+              { "src":"core_up" },
+              { "src":"per_core_user" },
+              { "src":"per_core_sys" },
+              { "src":"per_core_idle" },
+              { "src":"per_core_iowait" }
+          ],
+          "indices": [
+            { "name":"time_comp", "cols":["timestamp", "component_id"] }
+          ]
+        }
+      ]
+    },
+
+    "procnetdev2" : {
+      "type" : "static",
+      "rows": [
+        {
+          "schema": "netdev2_tom",
+            "cols": [
+		{ "src":"timestamp" },
+		{ "src":"component_id" },
+		{ "src":"netdev_list(name)" },
+		{ "src":"netdev_list(rx_packets)" },
+		{ "src":"netdev_list(rx_errs)" },
+		{ "src":"netdev_list(rx_drop)" },
+		{ "src":"netdev_list(tx_packets)" },
+		{ "src":"netdev_list(tx_errs)" },
+		{ "src":"netdev_list(tx_drop)" }
+	    ],
+            "indices": [
+		{ "name":"time_comp", "cols":["timestamp", "component_id"] }
+            ]
+        }
+      ]
+    },
+    "mt-slurm2" : {
+      "type": "static",
+      "rows": [
+        {
+          "schema": "slurm2_tom",
+          "cols": [
+            { "src":"timestamp", "dst":"timestamp","type":"ts" },
+            { "src":"component_id", "dst":"component_id","type":"u64" },
+            { "src":"job_list", "rec_member" : "job_id", "dst":"job_id","type":"u64" },
+            { "src":"job_list", "rec_member" : "job_name", "dst":"job_name","type":"char_array", "array_len":256 },
+            { "src":"job_list", "rec_member" : "job_tag", "dst":"job_tag","type":"char_array", "array_len":256 },
+            { "src":"job_list", "rec_member" : "user", "dst":"user","type":"char_array", "array_len":64 },
+            { "src":"job_list", "rec_member" : "job_start", "dst":"job_start","type":"u32" },
+            { "src":"job_list", "rec_member" : "job_end", "dst":"job_end","type":"u32" },
+            { "src":"job_list", "rec_member" : "node_count", "dst":"node_count","type":"u32" },
+            { "src":"job_list", "rec_member" : "task_count", "dst":"task_count","type":"u32" }
+          ],
+          "indices": [
+            { "name": "time_comp", "cols": [ "timestamp", "component_id" ] }
+          ]
+        }
+      ]
+    },
+    "the_default": {
+      "type": "as_is",
+      "indices": [
+        { "name": "job_comp_time", "cols": [ "job_id", "component_id", "timestamp" ] },
+        { "name": "time_comp", "cols": [ "timestamp", "component_id" ] }
+      ]
+    }
+  },
+  "digest": {
+    "39E8567D4EB7DA70FEC57FE8964B2CCA044546CA04C6C2F58C596860FEDAE8AF" : "meminfo",
+    "CF9BBA30180E8FF29E993FD8306EC3A618887C26CD3D86D0E6CDF5956B285537" : "vmstat",
+    "5BD07337CF356874EAAE5825B65CEDB4B88E9C8CAD4818EB06C48EF421EDA11D" : "mt-slurm2",
+    "E8B9CC8D83FB4E5B779071E801CA351B69DCB9E9CE2601A0B127A2977F11C62A" : "procnetdev2",
+    "DE06AA971422A79F057338003F42583338379A2C914BCF77DB506422745296BC" : "procstat",
+    "*": "the_default"
+  }
+}
