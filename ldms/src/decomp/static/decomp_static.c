@@ -418,7 +418,6 @@ __decomp_static_config(ldmsd_strgp_t strgp, json_t *jcfg,
 			} else {
 				dcol->dst = strdup(json_string_value(jval));
 			}
-
 		}
 		jidxs = json_object_get(jrow, "indices");
 		if (!jidxs)
@@ -530,6 +529,12 @@ static int __array_fill_from_json(__decomp_static_col_cfg_t dcol, json_t *jfill)
 	json_t *ent;
 	ldms_mval_t v = dcol->fill;
 
+	if (!v) {
+		v = dcol->fill = calloc(dcol->array_len, __ldms_vsz(dcol->type));
+		if (!v)
+			return ENOMEM;
+	}
+
 	json_array_foreach(jfill, i, ent) {
 		if (i >= dcol->array_len)
 			break;
@@ -579,10 +584,10 @@ static void __decomp_static_resolve_mid(ldmsd_strgp_t strgp,
 	int i, mid, rc;
 	__decomp_static_col_cfg_t dcol;
 	ldms_mval_t lh, le, rec_array, rec;
-	size_t mlen;
+	size_t mlen, cmlen;
 	const char *src;
-	enum ldms_value_type mtype;
-	json_t *jfill;
+	enum ldms_value_type mtype, cmtype;
+	json_t *jfill, *jtype, *jarraylen;
 	EVP_MD_CTX *evp_ctx = NULL;
 
 	evp_ctx = EVP_MD_CTX_create();
@@ -595,101 +600,49 @@ static void __decomp_static_resolve_mid(ldmsd_strgp_t strgp,
 		dcol = &drow->cols[i];
 		src = dcol->src;
 
+		mtype = LDMS_V_NONE;
+		mlen  = 1;
+
 		if (0 == strcmp(src, "timestamp")) {
 			mid_rbn->col_mids[i].mid = LDMSD_META_METRIC_ID_TIMESTAMP;
 			mid_rbn->col_mids[i].rec_mtype = LDMS_V_TIMESTAMP;
-			dcol->type = LDMS_V_TIMESTAMP;
+			mtype = dcol->type = LDMS_V_TIMESTAMP;
+			dcol->type = mtype;
 			goto next_col;
 		}
 
 		if (0 == strcmp(src, "producer")) {
 			mid_rbn->col_mids[i].mid = LDMSD_META_METRIC_ID_PRODUCER;
 			mid_rbn->col_mids[i].rec_mtype = LDMS_V_CHAR_ARRAY;
-			dcol->type = LDMS_V_CHAR_ARRAY;
+			mtype = dcol->type = LDMS_V_CHAR_ARRAY;
+			dcol->type = mtype;
 			goto next_col;
 		}
 
 		if (0 == strcmp(src, "instance")) {
 			mid_rbn->col_mids[i].mid = LDMSD_META_METRIC_ID_INSTANCE;
 			mid_rbn->col_mids[i].rec_mtype = LDMS_V_CHAR_ARRAY;
-			dcol->type = LDMS_V_CHAR_ARRAY;
+			mtype = dcol->type = LDMS_V_CHAR_ARRAY;
 			goto next_col;
 		}
 
 		mid = ldms_metric_by_name(set, drow->cols[i].src);
 		mid_rbn->col_mids[i].mid = mid;
-		if (mid < 0) /* OK to not exist */
-			goto next_col;
 
 		/* Infer column type from metric value */
+
 		mtype = ldms_metric_type_get(set, mid);
-		dcol->type = mtype;
 		mid_rbn->col_mids[i].mtype = mtype;
 		mid_rbn->col_mids[i].rec_mid = -EINVAL;
 		mid_rbn->col_mids[i].rec_mtype = LDMS_V_NONE;
 
-		jfill = json_object_get(dcol->jcol, "fill");
-		if (!jfill)
-			jfill = json_object_get(dcol->jcol, "default");
-
-		if (!jfill)
-			dcol->fill = NULL;
-
+		/* Resolve metric array length */
 		if (mtype < LDMS_V_CHAR_ARRAY) {
-			dcol->array_len = 1;
-			if (!jfill) /* fill value is already 0 */
-				goto next_col;
-			dcol->fill = &dcol->_fill;
-			rc = __prim_fill_from_json(dcol->fill, dcol->type, jfill);
-			if (rc) {
-				ovis_log(mylog, OVIS_LERROR,
-					 "strgp '%s': col[dst] '%s' "
-					 "Default value error: type mismatch\n",
-					 strgp->obj.name, dcol->dst);
-				goto next_col;
-			}
-		} else if (mtype == LDMS_V_CHAR_ARRAY) {
-			dcol->array_len = ldms_metric_array_get_len(set, mid_rbn->col_mids[i].mid);
-			if (!jfill) /* fill values are already 0 */
-				goto next_col;
-			if (!json_is_string(jfill)) {
-				ovis_log(mylog, OVIS_LERROR,
-					   "strgp '%s': col[dst] '%s': "
-					   "'fill' type mismatch: expecting a STRING\n",
-					   strgp->obj.name, dcol->dst);
-				goto next_col;
-			}
-			dcol->fill = calloc(dcol->array_len, __ldms_vsz(dcol->type));
-			assert(dcol->fill);
-			dcol->fill_len = json_string_length(jfill) + 1;
-			if (dcol->fill_len > dcol->array_len) {
-				ovis_log(mylog, OVIS_LWARN,
-					 "strgp '%s': col[dst] '%s': "
-					 "'fill' array length too long\n",
-					 strgp->obj.name, dcol->dst);
-			}
-			int fill_len = dcol->fill_len > dcol->array_len ? dcol->array_len : dcol->fill_len;
-			memcpy(dcol->fill, json_string_value(jfill), fill_len);
+			mlen = 1;
 		} else if (ldms_type_is_array(mtype)) {
-			dcol->array_len = ldms_metric_array_get_len(set, mid_rbn->col_mids[i].mid);
-			if (!jfill) /* fill values are already 0 */
-				goto next_col;
-			if (!json_is_array(jfill)) {
-				ovis_log(mylog, OVIS_LWARN,
-					 "strgp '%s': col[dst] '%s': "
-					 "'fill' type mismatch: expecting a LIST\n",
-					 strgp->obj.name, dcol->dst);
-				goto next_col;
-			}
-			dcol->fill_len = json_array_size(jfill);
-			rc = __array_fill_from_json(dcol, jfill);
-			if (rc) {
-				ovis_log(mylog, OVIS_LWARN,
-					 "strgp '%s': col[dst] '%s': "
-					 "'fill' error: type mismatch\n",
-					 strgp->obj.name, dcol->dst);
-			}
+			mlen = ldms_metric_array_get_len(set, mid);
 		} else if (mtype == LDMS_V_LIST) {
+			/* handling list of records */
 			lh = ldms_metric_get(set, mid);
 			le = ldms_list_first(set, lh, &mtype, &mlen);
 			if (!le) {
@@ -698,7 +651,8 @@ static void __decomp_static_resolve_mid(ldmsd_strgp_t strgp,
 				/* TODO: Error message. This function
 				   will never be called again so, the
 				   comment is nonesense */
-				goto next_col;
+				mtype = LDMS_V_NONE;
+				goto resolve_dcol_type;
 			}
 			if (mtype == LDMS_V_LIST) {
 				/* LIST of LIST is not supported */
@@ -717,7 +671,7 @@ static void __decomp_static_resolve_mid(ldmsd_strgp_t strgp,
 			mid = ldms_record_metric_find(le, drow->cols[i].rec_member);
 			mid_rbn->col_mids[i].rec_mid = mid;
 			if (mid >= 0) {
-				dcol->type = mtype = ldms_record_metric_type_get(le, mid, &mlen);
+				mtype = ldms_record_metric_type_get(le, mid, &mlen);
 				mid_rbn->col_mids[i].rec_mtype = mtype;
 				if (!drow->cols[i].dst) {
 					char name[256];
@@ -730,10 +684,14 @@ static void __decomp_static_resolve_mid(ldmsd_strgp_t strgp,
 				/* Specified record element not present */
 				mid_rbn->col_mids[i].rec_mid = -EINVAL;
 				mid_rbn->col_mids[i].rec_mtype = LDMS_V_NONE;
+				mtype = LDMS_V_NONE;
+				mlen = 1;
+				goto  resolve_dcol_type;
+				/* still proceed to determining dcol type & fill */
 				/* TODO: Error message */
-				continue;
 			}
 		} else if (mtype == LDMS_V_RECORD_ARRAY) {
+			/* handling array of records */
 			rec_array = ldms_metric_get(set, mid);
 			rec = ldms_record_array_get_inst(rec_array, 0);
 			if (!drow->cols[i].rec_member) {
@@ -748,8 +706,10 @@ static void __decomp_static_resolve_mid(ldmsd_strgp_t strgp,
 				/* The specified record member is not present in the instance */
 				mid_rbn->col_mids[i].rec_mid = -ENOENT;
 				mid_rbn->col_mids[i].rec_mtype = LDMS_V_NONE;
+				mtype = LDMS_V_NONE;
+				mlen  = 1;
+				goto  resolve_dcol_type;
 				/* TODO: Error message */
-				continue;
 			}
 			if (!drow->cols[i].dst) {
 				char name[256];
@@ -760,12 +720,117 @@ static void __decomp_static_resolve_mid(ldmsd_strgp_t strgp,
 			}
 			mtype = ldms_record_metric_type_get(rec, mid, &mlen);
 			mid_rbn->col_mids[i].rec_mid = mid;
-			dcol->type = mid_rbn->col_mids[i].rec_mtype = mtype;
+			mid_rbn->col_mids[i].rec_mtype = mtype;
 		}
+
+ resolve_dcol_type:
+		/* Resolve dcol type if it is not already resolved */
+		if (dcol->type == LDMS_V_NONE) {
+			jtype = json_object_get(dcol->jcol, "type");
+			if (jtype && json_is_string(jtype)) {
+				cmtype = ldms_metric_str_to_type(json_string_value(jtype));
+			} else {
+				cmtype = LDMS_V_NONE;
+			}
+			/* NOTE:
+			 * - mtype is discovered by the set / metric_id.
+			 * - cmtype is specified by config.
+			 */
+			if (cmtype == LDMS_V_NONE) {
+				/* Infer type from metric in the set if the
+				 * config does not specify type. */
+				dcol->type = mtype;
+			} else {
+				dcol->type = cmtype;
+			}
+
+			jarraylen = json_object_get(dcol->jcol, "array_len");
+			if (jarraylen && json_is_integer(jarraylen)) {
+				cmlen = json_integer_value(jarraylen);
+				dcol->array_len = cmlen;
+			} else {
+				dcol->array_len = mlen;
+			}
+		}
+		/* TODO: should warn about conflict dcol->type and mtype,
+		 *       and dcol->array_len and mlen */
+
+		/* Resolve fill only if dcol->type is resolved */
+		if (dcol->type == LDMS_V_NONE)
+			goto next_col;
+
+		if (dcol->fill) /* already resolved */
+			goto next_col;
+
+		/* NOTE mid can be -1 */
+		jfill = json_object_get(dcol->jcol, "fill");
+		if (!jfill)
+			jfill = json_object_get(dcol->jcol, "default");
+
+		if (dcol->type < LDMS_V_CHAR_ARRAY) {
+			dcol->fill = &dcol->_fill;
+			if (!jfill) /* fill value is already 0 */
+				goto next_col;
+			rc = __prim_fill_from_json(dcol->fill, dcol->type, jfill);
+			if (rc) {
+				ovis_log(mylog, OVIS_LERROR,
+					 "strgp '%s': col[dst] '%s' "
+					 "Default value error: type mismatch\n",
+					 strgp->obj.name, dcol->dst);
+				goto next_col;
+			}
+		} else if (dcol->type == LDMS_V_CHAR_ARRAY) {
+			if (!jfill) {
+				/* fill values are already 0 */
+				dcol->fill = &dcol->_fill;
+				dcol->fill_len = 1;
+				goto next_col;
+			}
+			if (!json_is_string(jfill)) {
+				ovis_log(mylog, OVIS_LERROR,
+					   "strgp '%s': col[dst] '%s': "
+					   "'fill' type mismatch: expecting a STRING\n",
+					   strgp->obj.name, dcol->dst);
+				goto next_col;
+			}
+			dcol->fill = calloc(dcol->array_len, __ldms_vsz(dcol->type));
+			assert(dcol->fill);
+			dcol->fill_len = json_string_length(jfill) + 1;
+			if (dcol->fill_len > dcol->array_len) {
+				ovis_log(mylog, OVIS_LWARN,
+					 "strgp '%s': col[dst] '%s': "
+					 "'fill' array length too long\n",
+					 strgp->obj.name, dcol->dst);
+			}
+			int fill_len = dcol->fill_len > dcol->array_len ? dcol->array_len : dcol->fill_len;
+			memcpy(dcol->fill, json_string_value(jfill), fill_len);
+		} else if (ldms_type_is_array(dcol->type)) {
+			if (!jfill) {
+				/* fill values are already 0 */
+				dcol->fill_len = 1;
+				dcol->fill = &dcol->_fill;
+				goto next_col;
+			}
+			if (!json_is_array(jfill)) {
+				ovis_log(mylog, OVIS_LWARN,
+					 "strgp '%s': col[dst] '%s': "
+					 "'fill' type mismatch: expecting a LIST\n",
+					 strgp->obj.name, dcol->dst);
+				goto next_col;
+			}
+			dcol->fill_len = json_array_size(jfill);
+			rc = __array_fill_from_json(dcol, jfill);
+			if (rc) {
+				ovis_log(mylog, OVIS_LWARN,
+					 "strgp '%s': col[dst] '%s': "
+					 "'fill' error: type mismatch\n",
+					 strgp->obj.name, dcol->dst);
+			}
+		}
+
 	next_col:
-		mtype = ldms_metric_type_get(set, mid);
 		EVP_DigestUpdate(evp_ctx, dcol->dst, strlen(dcol->dst));
-		EVP_DigestUpdate(evp_ctx, &mtype, sizeof(mtype));
+		EVP_DigestUpdate(evp_ctx, &dcol->type, sizeof(dcol->type));
 
 		if (!drow->cols[i].dst) {
 			drow->cols[i].dst = strdup(drow->cols[i].src);
@@ -866,6 +931,7 @@ col_mvals_fill(__decomp_static_col_cfg_t dcol,
 {
 	mcol->le = NULL;
 	mcol->mval = dcol->fill;
+	assert(dcol->fill);
 	mcol->mtype = dcol->type;
 	mcol->array_len = dcol->fill_len;
 }
@@ -1005,6 +1071,7 @@ static int __decomp_static_decompose(ldmsd_strgp_t strgp, ldms_set_t set,
 			dcol = &drow->cols[j];
 			mid = mid_rbn->col_mids[j].mid;
 			mcol = &col_mvals[j];
+			mcol->metric_id = mid;
 			if (mid < 0) { /* Metric not present the set, use the default value */
 				col_mvals_fill(dcol, mcol);
 				continue;
