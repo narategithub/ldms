@@ -248,6 +248,7 @@ static ldmsd_decomp_t flex_config(ldmsd_strgp_t strgp, json_t *jcfg,
 		int rc;
 		struct ldms_digest_s digest = {};
 
+		digest_rbn = NULL;
 		if (0 == strcmp(jkey, "*")) {
 			if (dcfg->default_digest) {
 				DECOMP_ERR(reqc, EINVAL,
@@ -307,7 +308,7 @@ static ldmsd_decomp_t flex_config(ldmsd_strgp_t strgp, json_t *jcfg,
 			continue;
 		}
 		json_array_foreach(jmap, i, jval) {
-			if (json_is_string(jval)) {
+			if (!json_is_string(jval)) {
 				DECOMP_ERR(reqc, EINVAL,
 					   "digest['%s'] list entries must be strings\n", jkey);
 				goto err_1;
