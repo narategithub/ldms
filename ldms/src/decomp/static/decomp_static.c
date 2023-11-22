@@ -355,25 +355,12 @@ __decomp_static_config(ldmsd_strgp_t strgp, json_t *jcfg,
 			if (!src_buf)
 				goto err_enomem;
 
-			if (NULL != (src = strstr(src_buf, "("))) {
-				/* Parse the source as src(rec_member). */
-				src = strdup(src_buf);
-				rec_member = strdup(src_buf);
-
-				int cnt = sscanf(src_buf, "%[^(](%[^)]", src, rec_member);
-				if (cnt != 2) {
-					DECOMP_ERR(reqc, EINVAL,
-						   "strgp '%s': row '%d': col '%d': "
-						   "column['src'] is incorrectly "
-						   "formatted. A record member must "
-						   "be formatted as "
-						   "src-metric(record_member)\n",
-						   strgp->obj.name, i, j);
-					goto err_0;
-				}
-				dcol->src = src;
-				dcol->rec_member = rec_member;
-				free(src_buf);
+			if (NULL != (src = strstr(src_buf, "->"))) {
+				/* Parse the source as `src->rec_member`. */
+				*src = 0;
+				rec_member = src+2;
+				dcol->src = src_buf;
+				dcol->rec_member = strdup(rec_member);
 			} else {
 				dcol->src = src_buf;
 			}
@@ -407,14 +394,12 @@ __decomp_static_config(ldmsd_strgp_t strgp, json_t *jcfg,
 			}
 			jval = json_object_get(jcol, "dst");
 			if (!jval) {
-				/* This will be filled in in the
-				 * decompose function because records
-				 * will need to be handled
-				 * differently */
 				if (!dcol->rec_member)
 					dcol->dst = strdup(dcol->src);
 				else
-					dcol->dst = strdup(dcol->rec_member);
+					asprintf(&dcol->dst, "%s->%s",
+							dcol->src,
+							dcol->rec_member);
 			} else {
 				dcol->dst = strdup(json_string_value(jval));
 			}
