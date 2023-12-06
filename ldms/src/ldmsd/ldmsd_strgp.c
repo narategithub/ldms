@@ -362,7 +362,7 @@ out_2:
 	free(match);
 out_1:
 	ldmsd_strgp_unlock(strgp);
-	ldmsd_strgp_put(strgp);
+	ldmsd_strgp_put(strgp, "find");
 	return rc;
 }
 
@@ -393,7 +393,7 @@ int ldmsd_strgp_prdcr_del(const char *strgp_name, const char *regex_str,
 	free(match);
 out_1:
 	ldmsd_strgp_unlock(strgp);
-	ldmsd_strgp_put(strgp);
+	ldmsd_strgp_put(strgp, "find");
 	return rc;
 }
 
@@ -448,7 +448,7 @@ int ldmsd_strgp_metric_add(const char *strgp_name, const char *metric_name,
 	TAILQ_INSERT_TAIL(&strgp->metric_list, metric, entry);
 out_1:
 	ldmsd_strgp_unlock(strgp);
-	ldmsd_strgp_put(strgp);
+	ldmsd_strgp_put(strgp, "find");
 	return rc;
 }
 
@@ -477,7 +477,7 @@ int ldmsd_strgp_metric_del(const char *strgp_name, const char *metric_name,
 	free(metric);
 out_1:
 	ldmsd_strgp_unlock(strgp);
-	ldmsd_strgp_put(strgp);
+	ldmsd_strgp_put(strgp, "find");
 	return rc;
 }
 
@@ -485,7 +485,7 @@ static ldmsd_strgp_ref_t strgp_ref_new(ldmsd_strgp_t strgp)
 {
 	ldmsd_strgp_ref_t ref = calloc(1, sizeof *ref);
 	if (ref)
-		ref->strgp = ldmsd_strgp_get(strgp);
+		ref->strgp = ldmsd_strgp_get(strgp, "strgp_ref");
 	return ref;
 }
 
@@ -639,7 +639,7 @@ int ldmsd_strgp_update_prdcr_set(ldmsd_strgp_t strgp, ldmsd_prdcr_set_t prd_set)
 	case LDMSD_STRGP_STATE_STOPPED:
 		if (ref) {
 			LIST_REMOVE(ref, entry);
-			ldmsd_strgp_put(ref->strgp);
+			ldmsd_strgp_put(ref->strgp, "strgp_ref");
 			ref->strgp = NULL;
 			free(ref);
 		}
@@ -747,7 +747,7 @@ int ldmsd_strgp_start(const char *name, ldmsd_sec_ctxt_t ctxt)
 		return ENOENT;
 	}
 	rc = __ldmsd_strgp_start(strgp, ctxt);
-	ldmsd_strgp_put(strgp);
+	ldmsd_strgp_put(strgp, "find");
 	return rc;
 }
 
@@ -780,7 +780,7 @@ int ldmsd_strgp_stop(const char *strgp_name, ldmsd_sec_ctxt_t ctxt)
 	if (!strgp)
 		return ENOENT;
 	rc = __ldmsd_strgp_stop(strgp, ctxt);
-	ldmsd_strgp_put(strgp);
+	ldmsd_strgp_put(strgp, "find");
 	return rc;
 }
 
@@ -818,7 +818,8 @@ int ldmsd_strgp_del(const char *strgp_name, ldmsd_sec_ctxt_t ctxt)
 	pi = &strgp->store->base;
 
 	rbt_del(cfgobj_trees[LDMSD_CFGOBJ_STRGP], &strgp->obj.rbn);
-	ldmsd_strgp_put(strgp); /* tree reference */
+	ldmsd_strgp_put(strgp, "cfgobj_tree"); /* tree reference */
+	ldmsd_strgp_put(strgp, "init");
 
 	if (strgp->decomp) {
 		strgp->decomp->release_decomp(strgp);
@@ -830,7 +831,7 @@ out_1:
 out_0:
 	pthread_mutex_unlock(cfgobj_locks[LDMSD_CFGOBJ_STRGP]);
 	if (strgp)
-		ldmsd_strgp_put(strgp); /* `find` reference */
+		ldmsd_strgp_put(strgp, "find"); /* `find` reference */
 	if (pi)
 		ldmsd_put_plugin(pi);
 	return rc;
