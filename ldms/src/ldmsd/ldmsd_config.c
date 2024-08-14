@@ -1005,11 +1005,11 @@ int __req_deferred_advertiser_start(ldmsd_req_ctxt_t reqc)
 			rc = reqc->errcode;
 			goto out;
 		}
-		ldmsd_prdcr_get(prdcr);
+		ldmsd_prdcr_get(prdcr, "advertiser_start");
 	}
 
 	prdcr->obj.perm |= LDMSD_PERM_DSTART;
-	ldmsd_prdcr_put(prdcr);
+	ldmsd_prdcr_put(prdcr, "advertiser_start");
 out:
 	free(name);
 	return rc;

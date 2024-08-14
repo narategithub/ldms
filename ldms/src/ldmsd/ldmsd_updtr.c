@@ -1335,17 +1335,17 @@ out_1:
 	return rc;
 }
 
-dmsd_prdcr_ref_t prdcr_ref_new(ldmsd_prdcr_t prdcr)
+ldmsd_prdcr_ref_t prdcr_ref_new(ldmsd_prdcr_t prdcr)
 {
 	ldmsd_prdcr_ref_t ref = calloc(1, sizeof *ref);
 	if (ref) {
-		ref->prdcr = ldmsd_prdcr_get(prdcr);
+		ref->prdcr = ldmsd_prdcr_get(prdcr, "ref_new");
 		rbn_init(&ref->rbn, prdcr->obj.name);
 	}
 	return ref;
 }
 
-lldmsd_prdcr_ref_t prdcr_ref_find(ldmsd_updtr_t updtr, const char *name)
+ldmsd_prdcr_ref_t prdcr_ref_find(ldmsd_updtr_t updtr, const char *name)
 {
 	struct rbn *rbn;
 	rbn = rbt_find(&updtr->prdcr_tree, name);

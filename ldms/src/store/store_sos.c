@@ -1372,9 +1372,9 @@ store(ldmsd_store_handle_t _sh, ldms_set_t set,
 			       "The job_id is missing from the metric set/schema.\n");
 		assert(si->ts_attr);
 	}
-	if (ss->timeout > 0) {
+	if (si->store->timeout > 0) {
 		clock_gettime(CLOCK_REALTIME, &now);
-		now.tv_sec += ss->timeout;
+		now.tv_sec += si->store->timeout;
 		if (sos_begin_x_wait(si->sos_handle->sos, &now)) {
 			LOG_(OVIS_LERROR,
 			     "Timeout attempting to open a transaction on the container '%s'.\n",

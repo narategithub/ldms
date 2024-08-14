@@ -1027,7 +1027,6 @@ static int __stream_recv(ldms_stream_event_t ev, json_stream_sampler_t p)
 	json_entity_t entity;
 	int rc = EINVAL;
 	ldms_schema_t schema = NULL;
-	struct json_cfg_inst *inst = arg;
 	json_entity_t schema_name;
 
 	LDEBUG("thread: %lu, stream: '%s', msg: '%s'\n", pthread_self(), ev->recv.name, ev->recv.data);

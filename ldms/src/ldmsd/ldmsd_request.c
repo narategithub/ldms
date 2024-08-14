@@ -9619,6 +9619,7 @@ static int prdcr_listen_add_handler(ldmsd_req_ctxt_t reqc)
 	if (regex_str) {
 		pl->hostname_regex_s = strdup(regex_str);
 		if (!pl->hostname_regex_s) {
+			ldmsd_cfgobj_put(&pl->obj, "listen_add");
 			goto enomem;
 		}
 
@@ -9628,14 +9629,19 @@ static int prdcr_listen_add_handler(ldmsd_req_ctxt_t reqc)
 			reqc->line_off = snprintf(reqc->line_buf, reqc->line_len,
 						"The regular expression string "
 						"'%s' is invalid.", regex_str);
-			goto err;
+			ldmsd_cfgobj_put(&pl->obj, "listen_add");
+			goto send_reply;
 		}
 	}
 
 	if (cidr_str) {
 		pl->cidr_str = strdup(cidr_str);
 		if (!pl->cidr_str) {
-			goto enomem;
+			reqc->errcode = ENOMEM;
+			reqc->line_off = snprintf(reqc->line_buf, reqc->line_len,
+						    "Memory allocation failure.");
+			ldmsd_cfgobj_put(&pl->obj, "listen_add");
+			goto send_reply;
 		}
 		rc = __cidr2addr6(cidr_str, &pl->net_addr, &pl->prefix_len);
 		if (rc) {
@@ -9643,7 +9649,8 @@ static int prdcr_listen_add_handler(ldmsd_req_ctxt_t reqc)
 			reqc->line_off = snprintf(reqc->line_buf, reqc->line_len,
 						"The given CIDR string '%s' "
 						"is invalid.", cidr_str);
-			goto err;
+			ldmsd_cfgobj_put(&pl->obj, "listen_add");
+			goto send_reply;
 		}
 	}
 
@@ -9768,7 +9775,7 @@ static int prdcr_listen_del_handler(ldmsd_req_ctxt_t reqc)
 		}
 
 		rbt_del(cfgobj_trees[LDMSD_CFGOBJ_PRDCR_LISTEN], &pl->obj.rbn);
-		ldmsd_cfgobj_put(&pl->obj); /* Put back the reference from the tree */
+		ldmsd_cfgobj_put(&pl->obj, "listen_add"); /* Put back the reference from the tree */
 		ldmsd_cfgobj_unlock(&pl->obj);
 		goto unlock_tree;
 	}
@@ -9787,7 +9794,7 @@ unlock_tree:
 
 send_reply:
 	if (pl)
-		ldmsd_cfgobj_put(&pl->obj); /* Put back the 'first' or 'next' reference */
+		ldmsd_cfgobj_put(&pl->obj, "iter"); /* Put back the 'first' or 'next' reference */
 	ldmsd_send_req_response(reqc, reqc->line_buf);
 	return rc;
 }
@@ -9830,7 +9837,7 @@ static int prdcr_listen_start_handler(ldmsd_req_ctxt_t reqc)
 
 	pl->obj.perm |= LDMSD_PERM_DSTART;
 	pl->state = LDMSD_PRDCR_LISTEN_STATE_RUNNING;
-	ldmsd_cfgobj_put(&pl->obj); /* Put back the 'find' reference */
+	ldmsd_cfgobj_put(&pl->obj, "find"); /* Put back the 'find' reference */
 	ldmsd_cfgobj_unlock(&pl->obj);
 
 send_reply:
@@ -9879,7 +9886,7 @@ static int prdcr_listen_stop_handler(ldmsd_req_ctxt_t reqc)
 	pl->obj.perm &= ~LDMSD_PERM_DSTART;
 	pl->state = LDMSD_PRDCR_LISTEN_STATE_STOPPED;
 out:
-	ldmsd_cfgobj_put(&pl->obj); /* Put back the 'find' reference */
+	ldmsd_cfgobj_put(&pl->obj, "find"); /* Put back the 'find' reference */
 	ldmsd_cfgobj_unlock(&pl->obj);
 
 send_reply:
@@ -9966,7 +9973,7 @@ out:
 	return rc;
 err:
 	if (pl)
-		ldmsd_cfgobj_put(&pl->obj);
+		ldmsd_cfgobj_put(&pl->obj, "iter");
 	ldmsd_cfg_unlock(LDMSD_CFGOBJ_PRDCR_LISTEN);
 	reqc->line_off = snprintf(reqc->line_buf, reqc->line_len,
 				"Error getting the status: Error %d.", rc);
@@ -10233,7 +10240,7 @@ static int advertise_handler(ldmsd_req_ctxt_t reqc)
 						"An error '%d' occurred on the peer.", reqc->errcode);
 				}
 			}
-			ldmsd_cfgobj_put(&pl->obj); /* Put back the 'first' or 'next' reference */
+			ldmsd_cfgobj_put(&pl->obj, "iter"); /* Put back the 'first' or 'next' reference */
 			goto send_reply;
 		}
 	}
@@ -10286,7 +10293,7 @@ static int advertiser_start_handler(ldmsd_req_ctxt_t reqc)
 			 */
 			goto send_reply;
 		}
-		ldmsd_prdcr_get(prdcr); /* Get a reference to match the find reference */
+		ldmsd_prdcr_get(prdcr, "advertiser_start"); /* Get a reference to match the find reference */
 	}
 
 	rc = __prdcr_start_handler(reqc, "advertiser_start", "advertiser");
