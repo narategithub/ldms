@@ -157,7 +157,7 @@ struct test_sampler_stream {
 LIST_HEAD(test_sampler_stream_list, test_sampler_stream);
 
 struct test_sampler_s {
-	struct ldmsd_sampler sampler;
+	int initialized;
 
 	/* extension */
 	struct test_sampler_schema_list schema_list;
@@ -172,7 +172,7 @@ static struct test_sampler_schema *test_sampler_schema_find(
 {
 	struct test_sampler_schema *ts_schema;
 	LIST_FOREACH(ts_schema, list, entry) {
-		if (0== strcmp(ts_schema->name, name))
+		if (0 == strcmp(ts_schema->name, name))
 			return ts_schema;
 	}
 	return NULL;
@@ -1705,10 +1705,16 @@ err:
 
 static int config(struct ldmsd_plugin *self, struct attr_value_list *kwl, struct attr_value_list *avl)
 {
-	test_sampler_t ts = (void*)self;
+	test_sampler_t ts = (test_sampler_t)self->context;
 	char *action;
 	int rc;
 
+	/* Protect against multiple config? */
+	if (__sync_bool_compare_and_swap(&ts->initialized, 0, 1)) {
+		LIST_INIT(&ts->schema_list);
+		LIST_INIT(&ts->set_list);
+		LIST_INIT(&ts->stream_list);
+	}
 	action = av_value(avl, "action");
 	if (action) {
 		rc = 0;
@@ -1882,7 +1888,7 @@ __sample_lists(struct test_sampler_set *ts_set)
 
 static int sample(struct ldmsd_sampler *self)
 {
-	test_sampler_t ts = (void*)self;
+	test_sampler_t ts = (test_sampler_t)self->base.context;
 	int rc;
 	struct test_sampler_set *ts_set;
 	struct test_sampler_schema *ts_schema;
@@ -1931,7 +1937,7 @@ static int sample(struct ldmsd_sampler *self)
 
 static void term(struct ldmsd_plugin *self)
 {
-	test_sampler_t ts = (void*)self;
+	test_sampler_t ts = (test_sampler_t)self->context;
 	struct test_sampler_schema *tschema;
 	while ((tschema = LIST_FIRST(&ts->schema_list))) {
 		LIST_REMOVE(tschema, entry);
@@ -2013,83 +2019,35 @@ static const char *usage(struct ldmsd_plugin *self)
 		"    <auth>           A authentication domain name\n";
 }
 
-static struct ldmsd_sampler test_sampler_plugin = {
+static ldms_set_t get_set(struct ldmsd_sampler *self)
+{
+	return NULL;
+}
+
+static struct ldmsd_sampler test_sampler = {
 	.base = {
 		.name = SAMP,
 		.type = LDMSD_PLUGIN_SAMPLER,
 		.term = term,
 		.config = config,
 		.usage = usage,
+		.context_size = sizeof(struct test_sampler_s),
 	},
+	.get_set = get_set,
 	.sample = sample,
 };
 
-void __ts_del(struct ldmsd_cfgobj *obj)
+struct ldmsd_plugin *get_plugin()
 {
-	test_sampler_t ts = (void*)obj;
-	struct test_sampler_stream *str_ent;
-	struct test_sampler_set *set_ent;
-	struct test_sampler_schema *sch_ent;
-
-	/* clean up stream publishing targets */
-	while ((str_ent = LIST_FIRST(&ts->stream_list))) {
-		LIST_REMOVE(str_ent, entry);
-		__stream_free(str_ent);
-	}
-
-	while ((set_ent = LIST_FIRST(&ts->set_list))) {
-		test_sampler_set_free(set_ent);
-	}
-
-	while ((sch_ent = LIST_FIRST(&ts->schema_list))) {
-		test_sampler_schema_free(sch_ent);
-	}
-
-	free(ts);
-}
-
-static void __once()
-{
-	static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
-	static int once = 0;
-	pthread_mutex_lock(&mtx);
-	if (once)
+	int rc;
+	if (mylog)
 		goto out;
+	mylog = ovis_log_register("sampler."SAMP, "The log subsystem of the " SAMP " plugin");
 	if (!mylog) {
-		mylog = ovis_log_register("sampler."SAMP,
-					  "Message for the " SAMP " plugin");
-		if (!mylog) {
-			ovis_log(NULL, OVIS_LWARN,
-				 "Failed to create the log subsystem "
-				 "of '" SAMP "' plugin. Error %d\n", errno);
-		}
+		rc = errno;
+		ovis_log(NULL, OVIS_LWARN, "Failed to create the subsystem "
+				"of '" SAMP "' plugin. Error %d\n", rc);
 	}
-
-	once = 1;
- out:
-	pthread_mutex_unlock(&mtx);
-}
-
-struct ldmsd_plugin *get_plugin_instance(const char *name,
-					 uid_t uid, gid_t gid, int perm)
-{
-	test_sampler_t ts;
-	__once();
-	ts = (void*)ldmsd_sampler_alloc(name, sizeof(*ts), __ts_del, uid, gid, perm);
-	if (!ts)
-		return NULL;
-
-	ts->sampler.base.term = term;
-	ts->sampler.base.config = config;
-	ts->sampler.base.usage = usage;
-
-	ts->sampler.sample = sample;
-
-	snprintf(ts->sampler.base.name, sizeof(ts->sampler.base.name), "test_sampler");
-
-	LIST_INIT(&ts->schema_list);
-	LIST_INIT(&ts->set_list);
-	LIST_INIT(&ts->stream_list);
-
-	return &ts->sampler.base;
+out:
+	return &test_sampler.base;
 }

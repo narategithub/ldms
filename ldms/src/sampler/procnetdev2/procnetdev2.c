@@ -285,7 +285,7 @@ char **strarray(char *s, int *n_out)
 
 static int config(struct ldmsd_plugin *self, struct attr_value_list *kwl, struct attr_value_list *avl)
 {
-	procnetdev2_t p = (void*)self;
+	procnetdev2_t p = (void*)self->context;
 	char* ifacelist = NULL;
 	char* excludes_str = NULL;
 	char *ivalue = NULL;
@@ -293,9 +293,8 @@ static int config(struct ldmsd_plugin *self, struct attr_value_list *kwl, struct
 	int rc;
 
 	rc = config_check(kwl, avl, arg);
-	if (rc != 0){
+	if (rc != 0)
 		return rc;
-	}
 
 	if (p->base_data) {
 		ovis_log(mylog, OVIS_LERROR, "Set already created.\n");
@@ -314,9 +313,8 @@ static int config(struct ldmsd_plugin *self, struct attr_value_list *kwl, struct
 	}
 
 	p->iface = strarray(ifacelist, &p->niface);
-	if (!p->iface) {
+	if (!p->iface)
 		goto err;
-	}
 	p->iface_str = ifacelist;
 
  excludes:
@@ -330,13 +328,12 @@ static int config(struct ldmsd_plugin *self, struct attr_value_list *kwl, struct
 		goto err;
 	}
 	p->excludes = strarray(excludes_str, &p->nexcludes);
-	if (!p->excludes) {
+	if (!p->excludes)
 		goto err;
-	}
 	p->excludes_str = excludes_str;
 
  cfg:
-	p->base_data = base_config(avl, SAMP, SAMP, mylog);
+	p->base_data = base_config(avl, self->inst_name, SAMP, mylog);
 	if (!p->base_data){
 		rc = EINVAL;
 		goto err;
@@ -368,7 +365,7 @@ static int config(struct ldmsd_plugin *self, struct attr_value_list *kwl, struct
 
 static int sample(struct ldmsd_sampler *self)
 {
-	procnetdev2_t p = (void*)self;
+	procnetdev2_t p = (void*)self->base.context;
 	int rc;
 	char *s;
 	char lbuf[256];
@@ -481,7 +478,7 @@ resize:
 
 static void term(struct ldmsd_plugin *self)
 {
-	procnetdev2_t p = (void*)self;
+	procnetdev2_t p = (void*)self->context;
 	if (p->mf) {
 		fclose(p->mf);
 		p->mf = NULL;
@@ -502,26 +499,6 @@ static void term(struct ldmsd_plugin *self)
 	p->niface = 0;
 }
 
-
-<<<<<<< HEAD
-static struct ldmsd_sampler procnetdev2_plugin = {
-	.base = {
-		.name = SAMP,
-		.type = LDMSD_PLUGIN_SAMPLER,
-		.term = term,
-		.config = config,
-		.usage = usage,
-	},
-	.sample = sample,
-};
-=======
-static void __procnetdev2_del(struct ldmsd_cfgobj *self)
-{
-	procnetdev2_t p = (void*)self;
-	free(p);
-}
->>>>>>> e644d3d0 (multi-instance procnetdev2)
-
 static void __once()
 {
 	static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -537,24 +514,27 @@ static void __once()
 	pthread_mutex_unlock(&mutex);
 }
 
-struct ldmsd_plugin *get_plugin_instance(const char *name,
-					 uid_t uid, gid_t gid, int perm)
+static ldms_set_t get_set(struct ldmsd_sampler *self)
 {
-	procnetdev2_t p;
+	return NULL;
+}
 
+static struct ldmsd_sampler procnetdev2_sampler = {
+	.base = {
+		.name = SAMP,
+		.type = LDMSD_PLUGIN_SAMPLER,
+		.term = term,
+		.config = config,
+		.usage = usage,
+		.context_size = sizeof(struct procnetdev2_s),
+	},
+	.get_set = get_set,
+	.sample = sample,
+};
+
+struct ldmsd_plugin *get_plugin()
+{
+	int rc;
 	__once();
-
-	p = (void*)ldmsd_sampler_alloc(name, sizeof(*p), __procnetdev2_del,
-				       uid, gid, perm);
-	if (!p)
-		return NULL;
-
-	snprintf(p->plugin.name, sizeof(p->plugin.name), "%s", SAMP);
-	p->plugin.term    = term;
-	p->plugin.config  = config;
-	p->plugin.usage   = usage;
-
-	p->sampler.sample = sample;
-
-	return &p->plugin;
+	return &procnetdev2_sampler.base;
 }

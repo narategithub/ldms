@@ -707,7 +707,7 @@ int __failover_send_strgp(ldmsd_failover_t f, ldms_t x, ldmsd_strgp_t s)
 
 	/* PLUGIN */
 	rc = ldmsd_req_cmd_attr_append_str(rcmd, LDMSD_ATTR_PLUGIN,
-					   s->plugin_name);
+					   s->store->cfg.name);
 	if (rc)
 		goto cleanup;
 
@@ -2344,7 +2344,7 @@ int failover_cfgstrgp_handler(ldmsd_req_ctxt_t req)
 		}
 		rbt_ins(&f->strgp_rbt, &srbn->rbn);
 		ldmsd_strgp_get(s, "find"); /* so that we can `put` without del */
-		s->plugin_name = plugin;
+		// TODO: s->plugin_name = plugin; I think this is broken...
 		plugin = NULL; /* give plugin to s */
 		s->schema = schema;
 		schema = NULL;

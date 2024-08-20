@@ -1081,14 +1081,13 @@ ldmsd_prdcr_new(const char *name, const char *xprt_name,
 }
 
 extern struct rbt *cfgobj_trees[];
-extern pthread_mutex_t *cfgobj_locks[];
 ldmsd_cfgobj_t __cfgobj_find(const char *name, ldmsd_cfgobj_type_t type);
 
 int ldmsd_prdcr_del(const char *prdcr_name, ldmsd_sec_ctxt_t ctxt)
 {
 	int rc = 0;
 	ldmsd_prdcr_t prdcr;
-	pthread_mutex_lock(cfgobj_locks[LDMSD_CFGOBJ_PRDCR]);
+	ldmsd_cfg_lock(LDMSD_CFGOBJ_PRDCR);
 	prdcr = (ldmsd_prdcr_t) __cfgobj_find(prdcr_name, LDMSD_CFGOBJ_PRDCR);
 	if (!prdcr) {
 		rc = ENOENT;
@@ -1127,7 +1126,7 @@ int ldmsd_prdcr_del(const char *prdcr_name, ldmsd_sec_ctxt_t ctxt)
 out_1:
 	ldmsd_prdcr_unlock(prdcr);
 out_0:
-	pthread_mutex_unlock(cfgobj_locks[LDMSD_CFGOBJ_PRDCR]);
+	ldmsd_cfg_unlock(LDMSD_CFGOBJ_PRDCR);
 	if (prdcr)
 		ldmsd_prdcr_put(prdcr, "find"); /* `find` reference */
 	return rc;

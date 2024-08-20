@@ -150,13 +150,11 @@ struct sos_instance {
 };
 
 struct store_sos_s {
-	struct ldmsd_store store;
 	pthread_mutex_t cfg_lock;
 	LIST_HEAD(sos_inst_list, sos_instance) inst_list;
 	char root_path[PATH_MAX]; /**< store root path */
-	time_t timeout;		/* Default is 5 seconds */
+	time_t timeout;		/* Default is forever */
 };
-
 
 struct row_schema_key_s {
 	const struct ldms_digest_s *digest;
@@ -377,7 +375,7 @@ static void sos_mval_set_ts(sos_value_t v, ldms_mval_t mval)
 	v->data->prim.timestamp_.fine.usecs = mval->v_ts.usec;
 }
 
-sos_mval_set_fn sos_mval_set_tbl[] = {
+static sos_mval_set_fn sos_mval_set_tbl[] = {
 	[LDMS_V_CHAR] = sos_mval_set_char,
 	[LDMS_V_U8] = sos_mval_set_u8,
 	[LDMS_V_S8] = sos_mval_set_s8,
@@ -555,7 +553,7 @@ static int config(struct ldmsd_plugin *self, struct attr_value_list *kwl, struct
 	int rc = 0;
 	int len;
 	char *value;
-	store_sos_t ss = (store_sos_t)self;
+	store_sos_t ss = (store_sos_t)self->context;
 
 	value = av_value(avl, "timeout");
 	if (value)
@@ -618,8 +616,9 @@ static void term(struct ldmsd_plugin *self)
 
 static const char *usage(struct ldmsd_plugin *self)
 {
-	return  "    config name=<NAME> plugin=store_sos path=<path>\n"
-		"       path The path to primary storage\n";
+	return  "    config name=<NAME> plugin=store_sos path=<path> timeout=<secs>\n"
+		"       path   - The path to primary storage\n"
+		"       timeout - Max wait in seconds to acquire database transaction.\n";
 }
 
 static void *get_ucontext(ldmsd_store_handle_t _sh)
@@ -633,7 +632,7 @@ open_store(struct ldmsd_store *s, const char *container, const char *schema,
 	   struct ldmsd_strgp_metric_list *metric_list, void *ucontext)
 {
 	struct sos_instance *si = NULL;
-	store_sos_t ss = (store_sos_t)s;
+	store_sos_t ss = (store_sos_t)s->base.context;
 
 	si = calloc(1, sizeof(*si));
 	if (!si)
@@ -1384,9 +1383,16 @@ store(ldmsd_store_handle_t _sh, ldms_set_t set,
 			return -1;
 		}
 	} else {
-		sos_begin_x(si->sos_handle->sos);
+		clock_gettime(CLOCK_REALTIME, &now);
+		while (sos_begin_x_wait(si->sos_handle->sos, &now)) {
+			now.tv_sec += 5; /* Report warning every 5 seconds */
+			LOG_(OVIS_LWARN,
+			     "Timeout attempting to open a transaction "
+			     "on the container '%s'...retrying.\n",
+			     si->path);
+			clock_gettime(CLOCK_REALTIME, &now);
+		}
 	}
-
 	switch (si->mode) {
 		case STORE_SOS_M_BASIC:
 			rc = __store_basic(si, set, metric_arry, metric_count);
@@ -1737,39 +1743,36 @@ commit_rows(ldmsd_strgp_t strgp, ldms_set_t set, ldmsd_row_list_t row_list, int 
 void store_sos_del(struct ldmsd_cfgobj *obj)
 {
 	store_sos_t ss = (void*)obj;
-	ldmsd_store_cleanup(&ss->store);
 	free(ss);
 }
 
-struct ldmsd_plugin *get_plugin_instance(const char *name,
-					 uid_t uid, gid_t gid, int perm)
+static struct ldmsd_store sos_store = {
+	.base.type   = LDMSD_PLUGIN_STORE,
+	.base.name   = "store_sos",
+	.base.term   = term,
+	.base.config = config,
+	.base.usage  = usage,
+	.base.context_size = sizeof(struct store_sos_s),
+	.open        = open_store,
+	.get_context = get_ucontext,
+	.store       = store,
+	.flush       = flush_store,
+	.close       = close_store,
+	.commit      = commit_rows,
+};
+
+struct ldmsd_plugin *get_plugin()
 {
-	store_sos_t ss;
-
-	ss = (void*)ldmsd_store_alloc(name, sizeof(*ss), store_sos_del, uid, gid, perm);
-
-	if (!ss)
-		goto out;
-
-	ss->store.base.term   = term;
-	ss->store.base.config = config;
-	ss->store.base.usage  = usage;
-
-	snprintf(ss->store.base.name, sizeof(ss->store.base.name), "store_sos");
-
-	ss->store.open        = open_store;
-	ss->store.get_context = get_ucontext;
-	ss->store.store       = store;
-	ss->store.flush       = flush_store;
-	ss->store.close       = close_store;
-	ss->store.commit      = commit_rows;
-
-	ss->timeout           = 5;
-
-	LIST_INIT(&ss->inst_list);
-
- out:
-	return &ss->store.base;
+	int rc;
+	if (!mylog) {
+		mylog = ovis_log_register("store.sos", "The log subsystem of the store_sos plugin");
+		if (!mylog) {
+			rc = errno;
+			ovis_log(NULL, OVIS_LWARN,
+				"Error %d creating the log subsystem 'store.sos'.", rc);
+		}
+	}
+	return &sos_store.base;
 }
 
 static void __attribute__ ((constructor)) store_sos_init();

@@ -960,7 +960,6 @@ ldmsd_updtr_new(const char *name, char *interval_str,
 }
 
 extern struct rbt *cfgobj_trees[];
-extern pthread_mutex_t *cfgobj_locks[];
 ldmsd_cfgobj_t __cfgobj_find(const char *name, ldmsd_cfgobj_type_t type);
 
 int ldmsd_updtr_del(const char *updtr_name, ldmsd_sec_ctxt_t ctxt)
@@ -968,7 +967,7 @@ int ldmsd_updtr_del(const char *updtr_name, ldmsd_sec_ctxt_t ctxt)
 	int rc = 0;
 	ldmsd_updtr_t updtr;
 
-	pthread_mutex_lock(cfgobj_locks[LDMSD_CFGOBJ_UPDTR]);
+	ldmsd_cfg_lock(LDMSD_CFGOBJ_UPDTR);
 	updtr = (ldmsd_updtr_t)__cfgobj_find(updtr_name, LDMSD_CFGOBJ_UPDTR);
 	if (!updtr) {
 		rc = ENOENT;
@@ -991,7 +990,7 @@ int ldmsd_updtr_del(const char *updtr_name, ldmsd_sec_ctxt_t ctxt)
 out_1:
 	ldmsd_updtr_unlock(updtr);
 out_0:
-	pthread_mutex_unlock(cfgobj_locks[LDMSD_CFGOBJ_UPDTR]);
+	ldmsd_cfg_unlock(LDMSD_CFGOBJ_UPDTR);
 	if (updtr)
 		ldmsd_updtr_put(updtr, "find"); /* `find` reference */
 	return rc;
@@ -1339,7 +1338,7 @@ ldmsd_prdcr_ref_t prdcr_ref_new(ldmsd_prdcr_t prdcr)
 {
 	ldmsd_prdcr_ref_t ref = calloc(1, sizeof *ref);
 	if (ref) {
-		ref->prdcr = ldmsd_prdcr_get(prdcr, "ref_new");
+		ref->prdcr = ldmsd_prdcr_get(prdcr, "prdcr_ref");
 		rbn_init(&ref->rbn, prdcr->obj.name);
 	}
 	return ref;

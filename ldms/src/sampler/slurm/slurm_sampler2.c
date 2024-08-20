@@ -59,7 +59,7 @@
 #include "ldms.h"
 #include "ldmsd.h"
 
-#define SAMP "slurm2"
+#define SAMP "slurm_sampler2"
 
 #ifndef ARRAY_LEN
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
@@ -320,7 +320,7 @@ static const char *usage(struct ldmsd_plugin *self)
 	"                   number may be larger (defaults to 8).\n";
 }
 
-static int create_metric_set()
+static int create_metric_set(const char *cfg_inst)
 {
 	int rc;
 
@@ -411,7 +411,7 @@ static int create_metric_set()
 	ldms_metric_set_u64(set, comp_id_idx, comp_id);
 	ldms_set_producer_name_set(set, producer_name);
 	ldms_set_publish(set);
-	ldmsd_set_register(set, SAMP);
+	ldmsd_set_register(set, cfg_inst);
 	return 0;
 err:
 	ldms_schema_delete(schema);
@@ -496,8 +496,8 @@ static int config(struct ldmsd_plugin *self, struct attr_value_list *kwl, struct
 			struct group *grp = getgrnam(value);
 			if (!grp) {
 				ovis_log(mylog, OVIS_LERROR,
-				       "The specified group '%s' does not exist\n",
-				       value);
+					"The specified group '%s' does not exist\n",
+					value);
 				rc = EINVAL;
 				goto err;
 			}
@@ -555,7 +555,7 @@ static int config(struct ldmsd_plugin *self, struct attr_value_list *kwl, struct
 		goto err;
 	}
 
-	rc = create_metric_set();
+	rc = create_metric_set(self->inst_name);
 	if (rc) {
 		ovis_log(mylog, OVIS_LERROR, "slurm-sampler: error %d creating "
 		       "the slurm job data metric set\n", rc);

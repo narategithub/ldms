@@ -74,10 +74,10 @@
 #include "store_common.h"
 #include "store_csv_common.h"
 
-#define TV_SEC_COL    0
-#define TV_USEC_COL    1
-#define GROUP_COL    2
-#define VALUE_COL    3
+#define TV_SEC_COL	0
+#define TV_USEC_COL	1
+#define GROUP_COL	2
+#define VALUE_COL	3
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(*a))
@@ -2334,10 +2334,10 @@ commit_rows(ldmsd_strgp_t strgp, ldms_set_t set,
 	return 0;
 }
 
-void store_csv_del(struct ldmsd_cfgobj *obj)
+#if 0
+static void store_csv_del(struct ldmsd_cfgobj *obj)
 {
 	store_csv_t sc = (void*)obj;
-	ldmsd_store_cleanup(&sc->store);
 
 	pthread_mutex_destroy(&sc->cfg_lock);
 	idx_destroy(sc->store_idx);
@@ -2403,6 +2403,33 @@ struct ldmsd_plugin *get_plugin_instance(const char *name,
 
 	return &sc->store.base;
 }
+#else
+static struct ldmsd_store store_csv = {
+	.base.type   = LDMSD_PLUGIN_STORE,
+	.base.name   = "store_csv",
+	.base.term   = term,
+	.base.config = config,
+	.base.usage  = usage,
+	.open        = open_store,
+	.get_context = get_ucontext,
+	.store       = store,
+	.flush       = flush_store,
+	.close       = close_store,
+	.commit      = commit_rows,
+};
+
+struct ldmsd_plugin *get_plugin()
+{
+        int rc;
+        mylog = ovis_log_register("store."PNAME, "The log subsystem of '" PNAME "' plugin");
+        if (!mylog) {
+                rc = errno;
+                ovis_log(NULL, OVIS_LWARN, "Failed to create the log subsystem "
+                                "of '" PNAME "' plugin. Error %d\n", rc);
+        }
+        return &store_csv.base;
+}
+#endif
 
 static void __attribute__ ((constructor)) store_csv_init();
 static void store_csv_init()
