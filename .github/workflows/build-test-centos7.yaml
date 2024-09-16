@@ -16,7 +16,7 @@ jobs:
   build:
     runs-on: ubuntu-20.04
     container:
-        image: ovishpc/ovis-centos-build
+      image: ovishpc/ldms-dev-alma:4.4.3
     steps:
     - uses: actions/checkout@v3
     - run: sh autogen.sh
@@ -26,7 +26,7 @@ jobs:
   distcheck:
     runs-on: ubuntu-20.04
     container:
-        image: ovishpc/ovis-centos-build
+      image: ovishpc/ldms-dev-alma:4.4.3
     steps:
     - uses: actions/checkout@v3
     - run: sh autogen.sh
@@ -36,7 +36,7 @@ jobs:
   build-with-rdma:
     runs-on: ubuntu-20.04
     container:
-        image: ovishpc/ovis-centos-build
+      image: ovishpc/ldms-dev-alma:4.4.3
     steps:
     - uses: actions/checkout@v3
     - run: sh autogen.sh
