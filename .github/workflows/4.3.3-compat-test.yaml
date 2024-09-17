@@ -39,7 +39,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     container:
-        image: ovishpc/ovis-compat-centos7
+      image: ovishpc/ldms-dev-alma:4.4.3
     steps:
     - uses: actions/checkout@v3
     - run: sh autogen.sh
