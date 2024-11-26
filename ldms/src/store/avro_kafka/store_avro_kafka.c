@@ -36,8 +36,6 @@
 #define STORE_AVRO_KAFKA "store_avro_kafka"
 static ovis_log_t aks_log = NULL;
 
-static int schema_cmp(void *a, const void *b);
-
 typedef struct store_kafka_s {
 	struct ldmsd_store store;
 
@@ -105,11 +103,6 @@ static const char *usage(struct ldmsd_plugin *self)
 	return _help_str;
 }
 
-static int schema_cmp(void *a, const void *b)
-{
-	return strcmp((char *)a, (char *)b);
-}
-
 struct schema_entry
 {
 	char *schema_name;
@@ -126,7 +119,6 @@ serdes_schema_find(aks_handle_t sh, char *schema_name,
 	serdes_schema_t *previous_schema = NULL;
 	serdes_schema_t *current_schema = NULL;
 	store_kafka_t sf = sh->sf;
-	serdes_schema_t *sschema = NULL;
 	struct schema_entry *entry;
 	char *json_buf = NULL;
 	size_t json_len;
@@ -1076,44 +1068,24 @@ commit_rows(ldmsd_strgp_t strgp, ldms_set_t set, ldmsd_row_list_t row_list,
 	return 0;
 }
 
-void store_kafka_del(struct ldmsd_cfgobj *obj)
+static struct ldmsd_store kafka_store = {
+	.base.type   = LDMSD_PLUGIN_STORE,
+	.base.name   = "store_sos",
+	.base.term   = term,
+	.base.config = config,
+	.base.usage  = usage,
+	.base.context_size = sizeof(struct store_kafka_s),
+	.open        = open_store,
+	.get_context = get_ucontext,
+	.store       = store,
+	.flush       = flush_store,
+	.close       = close_store,
+	.commit      = commit_rows,
+};
+
+struct ldmsd_plugin *get_plugin()
 {
-	store_kafka_t sf = (void*)obj;
-	ldmsd_store_cleanup(&sf->store);
-	free(sf);
-}
-
-struct ldmsd_plugin *get_plugin_instance(const char *name,
-					 uid_t uid, gid_t gid, int perm)
-{
-	store_kafka_t sf;
-
-	sf = (void*)ldmsd_store_alloc(name, sizeof(*sf), store_kafka_del, uid, gid, perm);
-
-	if (!sf)
-		goto out;
-
-	pthread_mutex_init(&sf->schema_rbt_lock, NULL);
-	pthread_mutex_init(&sf->sk_lock, NULL);
-	rbt_init(&sf->schema_tree, schema_cmp);
-
-	sf->g_serdes_encoding = AKS_ENCODING_AVRO;
-
-	sf->store.base.term   = term;
-	sf->store.base.config = config;
-	sf->store.base.usage  = usage;
-
-	snprintf(sf->store.base.name, sizeof(sf->store.base.name), "store_kafka");
-
-	sf->store.open        = open_store;
-	sf->store.get_context = get_ucontext;
-	sf->store.store       = store;
-	sf->store.flush       = flush_store;
-	sf->store.close       = close_store;
-	sf->store.commit      = commit_rows;
-
- out:
-	return &sf->store.base;
+	return &kafka_store.base;
 }
 
 static void __attribute__((constructor)) store_avro_kafka_init();
