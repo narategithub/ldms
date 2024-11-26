@@ -458,6 +458,61 @@ err:
 	return NULL;
 }
 
+struct ldmsd_worker_thrstat_result *ldmsd_xthrstat_get()
+{
+	/* TODO locks / race ... */
+	errno = ENOSYS;
+	struct ldmsd_worker_thrstat_result *ret;
+	ldmsd_sampler_t samp;
+	int count;
+	struct __thrstat_ent {
+		LIST_ENTRY(__thrstat_ent) entry;
+		struct ovis_scheduler_thrstat *stat;
+	} *se;
+	LIST_HEAD(, __thrstat_ent) lh = LIST_HEAD_INITIALIZER(lh);
+	struct timespec now;
+
+	count = 0;
+	clock_gettime(CLOCK_REALTIME, &now);
+
+	for (samp = ldmsd_sampler_first(); samp; samp = ldmsd_sampler_next(samp)) {
+		if (!samp->os || !samp->use_xthread)
+			continue;
+		se = calloc(1, sizeof(*se));
+		if (!se)
+			goto err1;
+		se->stat = ovis_scheduler_thrstat_get(samp->os, &now);
+		if (!se->stat) {
+			free(se);
+			goto err1;
+		}
+		LIST_INSERT_HEAD(&lh, se, entry);
+		count++;
+	}
+	if (!count) {
+		errno = ENOENT;
+		return NULL;
+	}
+	ret = malloc(sizeof(*ret) + sizeof(ret->entries[0])*count);
+	if (!ret)
+		goto err1;
+	ret->count = 0;
+	while ((se = LIST_FIRST(&lh))) {
+		LIST_REMOVE(se, entry);
+		ret->entries[ret->count++] = se->stat;
+		free(se);
+	}
+	assert(ret->count == count);
+	return ret;
+ err1:
+	while ((se = LIST_FIRST(&lh))) {
+		LIST_REMOVE(se, entry);
+		ovis_scheduler_thrstat_free(se->stat);
+		free(se);
+	}
+	return NULL;
+}
+
 void kpublish(int map_fd, int set_no, int set_size, char *set_name)
 {
 	ldms_set_t map_set;
@@ -1032,10 +1087,49 @@ int __sampler_set_info_add(ldmsd_sampler_t samp, long interval_us, long offset_u
 	return 0;
 }
 
+void *event_proc(void *v);
+
+int ldmsd_sampler_xthread_create(ldmsd_sampler_t samp)
+{
+	/* Create exclusive thread and scheduler */
+	int rc;
+	char xname[512];
+	samp->os = ovis_scheduler_new();
+	if (!samp->os) {
+		rc = errno;
+		goto out;
+	}
+	snprintf(xname, sizeof(xname), "xthread_%s", samp->cfg.name);
+	ovis_scheduler_name_set(samp->os, xname);
+	rc = pthread_create(&samp->xthread, NULL, event_proc, samp->os);
+	if (rc)
+		goto err1;
+	pthread_setname_np(samp->xthread, xname);
+	goto out;
+
+err1:
+	ovis_scheduler_free(samp->os);
+	samp->os = NULL;
+out:
+	return rc;
+}
+
+int ldmsd_sampler_xthread_delete(ldmsd_sampler_t samp)
+{
+	assert(samp->os);
+	ovis_scheduler_term(samp->os);
+	pthread_join(samp->xthread, NULL);
+	ovis_scheduler_free(samp->os);
+	samp->os = NULL;
+	bzero(&samp->xthread, sizeof(samp->xthread));
+	return 0;
+}
+
 /*
  * Start the sampler
  */
-int ldmsd_sampler_start(char *cfg_name, char *interval, char *offset)
+int ldmsd_sampler_start(char *cfg_name, char *interval, char *offset,
+			char *exclusive_thread)
 {
 	int rc = 0;
 	long sample_interval;
@@ -1044,9 +1138,13 @@ int ldmsd_sampler_start(char *cfg_name, char *interval, char *offset)
 	if (!samp)
 		return ENOENT;
 
-	if (samp->thread_id >= 0) {
+	if (samp->os) {
 		rc = EBUSY;
 		goto out;
+	}
+
+	if (exclusive_thread) {
+		samp->use_xthread = atoi(exclusive_thread);
 	}
 
 	rc = ovis_time_str2us(interval, &sample_interval);
@@ -1079,17 +1177,30 @@ int ldmsd_sampler_start(char *cfg_name, char *interval, char *offset)
 	samp->oev.param.ctxt = samp;
 	samp->oev.param.cb_fn = plugin_sampler_cb;
 
-	samp->thread_id = find_least_busy_thread();
-	samp->os = get_ovis_scheduler(samp->thread_id);
-	rc = ovis_scheduler_event_add(samp->os, &samp->oev);
-	if (0 == rc) {
-		ldmsd_sampler_get(samp, "start");
-		/* this ref will be put down in ldmsd_stop_sampler() */
+	if (samp->use_xthread) {
+		rc = ldmsd_sampler_xthread_create(samp);
+		if (rc)
+			goto out;
+		rc = ovis_scheduler_event_add(samp->os, &samp->oev);
+		if (rc) {
+			ldmsd_sampler_xthread_delete(samp);
+			goto out;
+		}
 	} else {
-		samp->os = NULL;
-		release_ovis_scheduler(samp->thread_id);
-		samp->thread_id = -1;
+		/* Use shared thread */
+		samp->thread_id = find_least_busy_thread();
+		samp->os = get_ovis_scheduler(samp->thread_id);
+		rc = ovis_scheduler_event_add(samp->os, &samp->oev);
+		if (rc) {
+			release_ovis_scheduler(samp->thread_id);
+			samp->os = NULL;
+			samp->thread_id = -1;
+			goto out;
+		}
 	}
+	ldmsd_sampler_get(samp, "start");
+	/* this ref will be put down in ldmsd_stop_sampler() */
+
 out:
 	ldmsd_sampler_unlock(samp);
 	ldmsd_sampler_put(samp, "find");
@@ -1197,20 +1308,19 @@ int ldmsd_sampler_stop(char *cfg_name)
 		return ENOENT;
 
 	ldmsd_sampler_lock(samp);
-	if (samp->thread_id < 0) {
-		rc = EBUSY;
-		goto out;
-	}
 	if (samp->os) {
 		ovis_scheduler_event_del(samp->os, &samp->oev);
-		samp->os = NULL;
-		release_ovis_scheduler(samp->thread_id);
-		samp->thread_id = -1;
+		if (samp->use_xthread) {
+			ldmsd_sampler_xthread_delete(samp);
+		} else {
+			samp->os = NULL;
+			release_ovis_scheduler(samp->thread_id);
+			samp->thread_id = -1;
+		}
 		ldmsd_sampler_put(samp, "start");
 	} else {
 		rc = -EBUSY;
 	}
-out:
 	ldmsd_sampler_unlock(samp);
 	ldmsd_sampler_put(samp, "find");
 	return rc;
@@ -2174,18 +2284,22 @@ int main(int argc, char *argv[])
 		av_free(auth_opt);
 		exit(1);
 	}
+	char tname[256];
 	for (op = 0; op < ev_thread_count; op++) {
+		snprintf(tname, sizeof(tname), "ldmsd_wkr_%d", op);
 		ovis_scheduler[op] = ovis_scheduler_new();
 		if (!ovis_scheduler[op]) {
 			ovis_log(NULL, OVIS_LERROR, "Error creating an OVIS scheduler.\n");
 			cleanup(6, "OVIS scheduler create failed");
 		}
+		ovis_scheduler_name_set(ovis_scheduler[op], tname);
 		ret = pthread_create(&ev_thread[op], NULL, event_proc, ovis_scheduler[op]);
 		if (ret) {
 			ovis_log(NULL, OVIS_LERROR, "Error %d creating the event "
 					"thread.\n", ret);
 			cleanup(7, "event thread create fail");
 		}
+		pthread_setname_np(ev_thread[op], tname);
 	}
 
 	if (!setfile)

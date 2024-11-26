@@ -236,7 +236,6 @@ ldmsd_store_t ldmsd_store_alloc(const char *inst_name,
 	return store;
 }
 
-
 const char *prdcr_state_str(enum ldmsd_prdcr_state state)
 {
 	switch (state) {

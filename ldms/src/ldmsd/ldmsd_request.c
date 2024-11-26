@@ -4964,6 +4964,7 @@ extern int ldmsd_term_plugin(char *plugin_name);
 static int plugn_start_handler(ldmsd_req_ctxt_t reqc)
 {
 	char *name, *interval_us, *offset, *attr_name;
+	char *exclusive_thread;
 	name = interval_us = offset = NULL;
 	size_t cnt = 0;
 
@@ -4976,9 +4977,12 @@ static int plugn_start_handler(ldmsd_req_ctxt_t reqc)
 	if (!interval_us)
 		goto einval;
 
+	exclusive_thread = ldmsd_req_attr_str_value_get_by_id(reqc, LDMSD_ATTR_XTHREAD);
+
 	offset = ldmsd_req_attr_str_value_get_by_id(reqc, LDMSD_ATTR_OFFSET);
 
-	reqc->errcode = ldmsd_sampler_start(name, interval_us, offset);
+	reqc->errcode = ldmsd_sampler_start(name, interval_us, offset,
+					    exclusive_thread);
 	if (reqc->errcode == 0) {
 		__dlog(DLOG_CFGOK, "start name=%s%s%s%s%s\n", name,
 			interval_us ? " interval=" : "",
@@ -5239,6 +5243,7 @@ send_reply:
 static int plugn_config_handler(ldmsd_req_ctxt_t reqc)
 {
 	char *inst_name, *config_attr, *attr_name;
+	char *exclusive_thread;
 	inst_name = config_attr = NULL;
 	struct attr_value_list *av_list = NULL;
 	struct attr_value_list *kw_list = NULL;
@@ -5271,6 +5276,7 @@ static int plugn_config_handler(ldmsd_req_ctxt_t reqc)
 		cfg = &sampler->cfg;
 		ldmsd_sampler_put(sampler, "find");
 	}
+
 	config_attr = ldmsd_req_attr_str_value_get_by_id(reqc, LDMSD_ATTR_STRING);
 	if (!config_attr) {
 		cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
@@ -5319,6 +5325,11 @@ static int plugn_config_handler(ldmsd_req_ctxt_t reqc)
 	free(cfg->kvl_str);
 	cfg->avl_str = av_to_string(av_list, 0);
 	cfg->kvl_str = av_to_string(kw_list, 0);
+
+	exclusive_thread = av_value(av_list, "exclusive_thread");
+	if (exclusive_thread && sampler)
+		sampler->use_xthread = atoi(exclusive_thread);
+
 	reqc->errcode = api->config(api, kw_list, av_list);
 	if (reqc->errcode) {
 		cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
@@ -7502,6 +7513,7 @@ out:
  */
 extern void ldmsd_worker_thrstat_free(struct ldmsd_worker_thrstat_result *res);
 extern struct ldmsd_worker_thrstat_result *ldmsd_worker_thrstat_get();
+extern struct ldmsd_worker_thrstat_result *ldmsd_xthrstat_get();
 static char * __thread_stats_as_json(size_t *json_sz)
 {
 	char *buff, *s;
@@ -7515,6 +7527,7 @@ static char * __thread_stats_as_json(size_t *json_sz)
 	struct rbn *rbn;
 	struct store_time_thread *stime_ent;
 	struct ldmsd_worker_thrstat_result *wres = NULL;
+	struct ldmsd_worker_thrstat_result *xres = NULL;
 	struct ovis_scheduler_thrstat *wthr;
 	s = buff = NULL;
 
@@ -7532,6 +7545,10 @@ static char * __thread_stats_as_json(size_t *json_sz)
 
 	wres = ldmsd_worker_thrstat_get();
 	if (!wres)
+		goto __APPEND_ERR;
+
+	xres = ldmsd_xthrstat_get();
+	if (!xres && errno != ENOENT)
 		goto __APPEND_ERR;
 
 	buff = malloc(sz);
@@ -7604,6 +7621,23 @@ static char * __thread_stats_as_json(size_t *json_sz)
 			__APPEND("   }\n");
 	}
 	__APPEND(" ],\n"); /* end of worker threads */
+	__APPEND(" \"xthreads\": [\n");
+	for (i = 0; xres && i < xres->count; i++) {
+		wthr = xres->entries[i];
+		__APPEND("  {\n");
+		__APPEND("   \"name\": \"%s\",\n", wthr->name);
+		__APPEND("   \"tid\": %d,\n", wthr->tid);
+		__APPEND("   \"thread_id\": \"%p\",\n", (void*)wthr->thread_id);
+		__APPEND("   \"idle_pc\" : %lf,\n", wthr->idle_pc);
+		__APPEND("   \"active_pc\" : %lf,\n", wthr->active_pc);
+		__APPEND("   \"total_us\" : %ld,\n", wthr->dur);
+		__APPEND("   \"ev_cnt\" : %ld\n", wthr->ev_cnt);
+		if (i < xres->count - 1)
+			__APPEND("   },\n");
+		else
+			__APPEND("   }\n");
+	}
+	__APPEND(" ],\n"); /* end of worker threads */
 	(void)clock_gettime(CLOCK_REALTIME, &end);
 	uint64_t compute_time = ldms_timespec_diff_us(&start, &end);
 
@@ -7622,6 +7656,8 @@ static char * __thread_stats_as_json(size_t *json_sz)
 __APPEND_ERR:
 	ldms_thrstat_result_free(res);
 	ldmsd_worker_thrstat_free(wres);
+	if (xres)
+		ldmsd_worker_thrstat_free(xres);
 	while ((rbn = rbt_min(&store_time_tree))) {
 		rbt_del(&store_time_tree, rbn);
 		stime_ent = container_of(rbn, struct store_time_thread, rbn);

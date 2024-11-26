@@ -978,6 +978,8 @@ struct ldmsd_sampler_inst {
 	 * ldmsd_set_register
 	 */
 	LIST_HEAD(, ldmsd_sampler_set) set_list;
+	int use_xthread; /* !0 if use exclusitve thread */
+	pthread_t xthread; /* the exclusive thread */
 };
 
 #define LDMSD_DEFAULT_SAMPLE_INTERVAL 1000000
@@ -1188,7 +1190,8 @@ ldmsd_sampler_t ldmsd_sampler_first();
 ldmsd_sampler_t ldmsd_sampler_next(ldmsd_sampler_t);
 void ldmsd_sampler_lock(ldmsd_sampler_t samp);
 void ldmsd_sampler_unlock(ldmsd_sampler_t samp);
-extern int ldmsd_sampler_start(char *name, char *interval, char *offset);
+extern int ldmsd_sampler_start(char *cfg_name, char *interval, char *offset,
+			char *exclusive_thread);
 extern int ldmsd_sampler_stop(char *name);
 
 ldmsd_store_t ldmsd_store_find(const char *name);
