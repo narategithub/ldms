@@ -1222,7 +1222,6 @@ static struct ldmsd_sampler js_stream_sampler = {
 
 struct ldmsd_plugin *get_plugin()
 {
-	int rc;
 	__once();
 	return &js_stream_sampler.base;
 }

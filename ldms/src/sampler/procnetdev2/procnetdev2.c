@@ -514,11 +514,6 @@ static void __once()
 	pthread_mutex_unlock(&mutex);
 }
 
-static ldms_set_t get_set(struct ldmsd_sampler *self)
-{
-	return NULL;
-}
-
 static struct ldmsd_sampler procnetdev2_sampler = {
 	.base = {
 		.name = SAMP,
@@ -528,13 +523,11 @@ static struct ldmsd_sampler procnetdev2_sampler = {
 		.usage = usage,
 		.context_size = sizeof(struct procnetdev2_s),
 	},
-	.get_set = get_set,
 	.sample = sample,
 };
 
 struct ldmsd_plugin *get_plugin()
 {
-	int rc;
 	__once();
 	return &procnetdev2_sampler.base;
 }

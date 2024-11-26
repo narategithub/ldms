@@ -949,7 +949,6 @@ typedef struct ldmsd_sampler {
 struct ldmsd_store_inst {
 	struct ldmsd_cfgobj cfg;
 	struct ldmsd_store *api;
-	// void *context;
 };
 
 typedef struct ldmsd_sampler_inst *ldmsd_sampler_t;

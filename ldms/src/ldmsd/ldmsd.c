@@ -555,6 +555,7 @@ void plugin_sampler_cb(ovis_event_t oev)
 	assert(samp->cfg.type == LDMSD_CFGOBJ_SAMPLER);
 	assert(samp->api->base.type == LDMSD_PLUGIN_SAMPLER);
 	int rc = samp->api->sample(samp->api);
+	ldmsd_cfgobj_unlock(&samp->cfg);
 	if (rc) {
 		/*
 		 * If the sampler reports an error don't reschedule
@@ -566,69 +567,8 @@ void plugin_sampler_cb(ovis_event_t oev)
 			"the plug-in.\n", samp->cfg.name);
 		stop_sampler(samp);
 	}
-	ldmsd_cfgobj_unlock(&samp->cfg);
 	ldmsd_cfgobj_put(&samp->cfg, "cb");
 }
-
-#if 0
-void ldmsd_set_tree_lock()
-{
-	pthread_mutex_lock(&set_tree_lock);
-}
-
-void ldmsd_set_tree_unlock()
-{
-	pthread_mutex_unlock(&set_tree_lock);
-}
-
-/* Caller must hold the set tree lock. */
-ldmsd_plugin_set_list_t ldmsd_plugin_set_list_first()
-{
-	struct rbn *rbn;
-
-	rbn = rbt_min(&set_tree);
-	if (!rbn)
-		return NULL;
-	return container_of(rbn, struct ldmsd_plugin_set_list, rbn);
-}
-
-ldmsd_plugin_set_list_t ldmsd_plugin_set_list_next(ldmsd_plugin_set_list_t list)
-{
-	struct rbn *rbn;
-	rbn = rbn_succ(&list->rbn);
-	if (!rbn)
-		return NULL;
-	return container_of(rbn, struct ldmsd_plugin_set_list, rbn);
-}
-
-ldmsd_plugin_set_list_t ldmsd_plugin_set_list_find(const char *plugin_name)
-{
-	struct rbn *rbn;
-	rbn = rbt_find(&set_tree, plugin_name);
-	if (!rbn) {
-		return NULL;
-	}
-	return container_of(rbn, struct ldmsd_plugin_set_list, rbn);
-}
-
-/* Caller must hold the set_tree lock */
-ldmsd_plugin_set_t ldmsd_plugin_set_first(const char *plugin_name)
-{
-	struct rbn *rbn;
-	ldmsd_plugin_set_list_t list;
-	rbn = rbt_find(&set_tree, plugin_name);
-	if (!rbn)
-		return NULL;
-	list = container_of(rbn, struct ldmsd_plugin_set_list, rbn);
-	return LIST_FIRST(&list->list);
-}
-
-/* Caller must hold the set_tree lock */
-ldmsd_plugin_set_t ldmsd_plugin_set_next(ldmsd_plugin_set_t set)
-{
-	return LIST_NEXT(set, entry);
-}
-#endif
 
 int ldmsd_set_register(ldms_set_t set, const char *cfg_name)
 {
@@ -662,7 +602,6 @@ int ldmsd_set_register(ldms_set_t set, const char *cfg_name)
 	return 0;
 err_0:
 	ldmsd_cfgobj_put(&samp->cfg, "find");
-	free(s);
 	return rc;
 }
 
@@ -1034,8 +973,10 @@ int ldmsd_sampler_start(char *cfg_name, char *interval, char *offset)
 	}
 
 	rc = ovis_time_str2us(interval, &sample_interval);
-	if (rc)
-		return rc;
+	if (rc) {
+		rc = EDOM;
+		goto out;
+	}
 
 	samp->sample_interval_us = sample_interval;
 	if (offset) {
@@ -1046,7 +987,7 @@ int ldmsd_sampler_start(char *cfg_name, char *interval, char *offset)
 		}
 		if ( !((sample_interval >= 10) &&
 		       (sample_interval >= labs(sample_offset)*2)) ){
-			rc = -EDOM;
+			rc = EDOM;
 			goto out;
 		}
 	}
@@ -1075,7 +1016,6 @@ int ldmsd_sampler_start(char *cfg_name, char *interval, char *offset)
 		samp->thread_id = -1;
 	}
 out:
-	ldmsd_sampler_unlock(samp);
 	ldmsd_sampler_put(samp, "start");
 	return rc;
 }
@@ -1125,7 +1065,8 @@ int ldmsd_oneshot_sample(const char *cfg_name, const char *ts,
 				"The schedule time '%s' "
 				"is ahead of the current time %jd",
 				 ts, (intmax_t)now);
-			return EINVAL;
+			rc = EINVAL;
+			goto out;
 		}
 		tv.tv_sec = diff;
 	}
@@ -1134,10 +1075,10 @@ int ldmsd_oneshot_sample(const char *cfg_name, const char *ts,
 	struct oneshot *ossample = malloc(sizeof(*ossample));
 	if (!ossample) {
 		snprintf(errstr, errlen, "Out of Memory");
-		return ENOMEM;
+		rc = ENOMEM;
+		goto out;
 	}
 
-	ldmsd_sampler_lock(samp);
 	ossample->samp = samp;
 	if (samp->thread_id < 0) {
 		snprintf(errstr, errlen,
@@ -1160,7 +1101,7 @@ int ldmsd_oneshot_sample(const char *cfg_name, const char *ts,
 err:
 	free(ossample);
 out:
-	ldmsd_sampler_unlock(samp);
+	ldmsd_sampler_put(samp, "find");
 	return rc;
 }
 
@@ -1192,6 +1133,7 @@ int ldmsd_sampler_stop(char *cfg_name)
 out:
 	ldmsd_sampler_unlock(samp);
 	ldmsd_sampler_put(samp, "start");
+	ldmsd_sampler_put(samp, "find");
 	return rc;
 }
 
@@ -1491,9 +1433,10 @@ static int __create_default_auth()
 	int rc = 0;
 
 	auth_dom = ldmsd_auth_find(DEFAULT_AUTH);
-	if (auth_dom)
+	if (auth_dom) {
+		ldmsd_auth_put(auth_dom, "find");
 		return 0;
-
+	}
 	auth_dom = ldmsd_auth_new_with_auth(DEFAULT_AUTH, auth_name, auth_opt,
 					geteuid(), getegid(), 0600);
 	if (!auth_dom) {

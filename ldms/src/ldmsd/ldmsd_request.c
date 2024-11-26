@@ -9197,7 +9197,7 @@ static int prdcr_listen_add_handler(ldmsd_req_ctxt_t reqc)
 			reqc->line_off = snprintf(reqc->line_buf, reqc->line_len,
 						"The given quota '%s' "
 						"is invalid.", quota);
-			ldmsd_cfgobj_put(&pl->obj);
+			ldmsd_cfgobj_put(&pl->obj, "init");
 			goto send_reply;
 		}
 	} else {
@@ -9211,7 +9211,7 @@ static int prdcr_listen_add_handler(ldmsd_req_ctxt_t reqc)
 			reqc->line_off = snprintf(reqc->line_buf, reqc->line_len,
 						"The given rx_rate '%s' "
 						"is invalid.", rx_rate);
-			ldmsd_cfgobj_put(&pl->obj);
+			ldmsd_cfgobj_put(&pl->obj, "init");
 			goto send_reply;
 		}
 	} else {
@@ -9250,7 +9250,7 @@ err:
 	rbt_del(cfgobj_trees[LDMSD_CFGOBJ_PRDCR_LISTEN], &pl->obj.rbn);
 	ldmsd_cfg_unlock(LDMSD_CFGOBJ_PRDCR_LISTEN);
 	ldmsd_cfgobj_unlock(&pl->obj);
-	ldmsd_cfgobj_put(&pl->obj);
+	ldmsd_cfgobj_put(&pl->obj, "init");
 	goto send_reply;
 }
 
@@ -10036,7 +10036,7 @@ static int qgroup_member_add_handler(ldmsd_req_ctxt_t reqc)
 	free(a_xprt);
 	free(a_auth);
 	if (auth)
-		ldmsd_cfgobj_put(&auth->obj);
+		ldmsd_cfgobj_put(&auth->obj, "init");
 	return rc;
 }
 

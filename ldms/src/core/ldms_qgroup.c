@@ -380,8 +380,11 @@ int __qgroup_member_add(ldms_qgroup_t qg, const char *xprt_name,
 
  err:
 	QG_UNLOCK(qg);
-	if (m)
+	if (m) {
+		free(m->c_auth_av_list);
 		free(m);
+	}
+
 	return rc;
 }
 

@@ -74,11 +74,6 @@ static base_data_t base;
 
 static ovis_log_t mylog;
 
-static ldms_set_t get_set(struct ldmsd_sampler *self)
-{
-	return set;
-}
-
 static int getNProcs(char buf[])
 {
 	int nproc = 0;

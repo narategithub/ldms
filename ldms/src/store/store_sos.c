@@ -643,9 +643,13 @@ open_store(struct ldmsd_store *s, const char *container, const char *schema,
 	si->container = strdup(container);
 	if (!si->container)
 		goto err1;
-	si->schema_name = strdup(schema);
-	if (!si->schema_name)
-		goto err2;
+	if (schema) {
+		si->schema_name = strdup(schema);
+		if (!si->schema_name)
+			goto err2;
+	} else {
+		si->schema_name = NULL;
+	}
 	size_t pathlen =
 		strlen(ss->root_path) + strlen(si->container) + 4;
 	si->path = malloc(pathlen);

@@ -4200,7 +4200,7 @@ int ldms_xprt_listen_by_name(ldms_t x, const char *host, const char *port_no,
 	if (!ai)
 		ai = ai_list;
 	rc = ldms_xprt_listen(x, ai->ai_addr, ai->ai_addrlen, cb, cb_arg);
-	freeaddrinfo(ai);
+	freeaddrinfo(ai_list);
 	return rc;
 }
 
