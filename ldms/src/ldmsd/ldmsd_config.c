@@ -296,21 +296,31 @@ int ldmsd_load_plugin(const char *inst_name, char *plugin_name,
 		      char *errstr, size_t errlen)
 {
 	struct ldmsd_plugin *api = load_plugin(plugin_name);
+	struct ldmsd_cfgobj *obj = NULL;
 	if (!api)
 		return errno;
 	if (!inst_name)
 		inst_name = plugin_name;
 	switch (api->type) {
 	case LDMSD_PLUGIN_SAMPLER:
-		if (ldmsd_sampler_alloc(inst_name, (struct ldmsd_sampler *)api,
-			NULL,
-			geteuid(), getegid(), 0660))
+		obj = (ldmsd_cfgobj_t)ldmsd_sampler_alloc(inst_name,
+					(struct ldmsd_sampler *)api,
+					NULL, geteuid(), getegid(), 0660);
+		if (obj) {
+			/* alloc returned the locked object */
+			ldmsd_cfgobj_unlock(obj);
 			return 0;
+		}
 		break;
 	case LDMSD_PLUGIN_STORE:
-		if (ldmsd_store_alloc(inst_name, (struct ldmsd_store *)api, NULL,
-			geteuid(), getegid(), 0660))
+		obj = (ldmsd_cfgobj_t)ldmsd_store_alloc(inst_name,
+					(struct ldmsd_store *)api, NULL,
+					geteuid(), getegid(), 0660);
+		if (obj) {
+			/* alloc returned the locked object */
+			ldmsd_cfgobj_unlock(obj);
 			return 0;
+		}
 		break;
 	default:
 		errno = EINVAL;
