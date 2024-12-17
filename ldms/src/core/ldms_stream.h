@@ -120,6 +120,10 @@ struct ldms_stream_client_s {
 
 	struct ldms_rail_rate_quota_s rate_quota;
 
+	serdes_t *serdes; /* serdes handle */
+
+	int is_python; /* mark if this is a client from Python */
+
 	int desc_len;
 	char *desc; /* a short description at &match[match_len] */
 	int match_len; /* length of c->match[], including '\0' */
@@ -179,4 +183,12 @@ int __rep_publish(struct ldms_rail_ep_s *rep, const char *stream_name,
 			struct ldms_stream_hop *hops,
 			const char *data, size_t data_len,
 			struct strm_publish_profile_s *pts);
+
+ldms_stream_client_t
+__client_alloc(const char *stream, int is_regex,
+	       ldms_stream_event_cb_t cb_fn, void *cb_arg,
+	       const char *desc);
+void __client_free(ldms_stream_client_t c);
+int __client_subscribe(struct ldms_stream_client_s *c);
+
 #endif /* __LDMS_STREAM_H__ */

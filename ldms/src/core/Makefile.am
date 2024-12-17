@@ -18,6 +18,7 @@ libldms_la_SOURCES = ldms.c ldms_xprt.c ldms_private.h \
 		     ldms_heap.c ldms_heap.h \
 		     ldms_rail.c ldms_rail.h \
 		     ldms_stream.c ldms_stream.h \
+		     ldms_stream_avro_ser.c ldms_stream_avro_ser.h \
 		     ldms_qgroup.c ldms_qgroup.h
 libldms_la_LIBADD = -ldl -lpthread $(top_builddir)/lib/src/coll/libcoll.la \
 		    $(top_builddir)/lib/src/ovis_json/libovis_json.la \
@@ -25,6 +26,6 @@ libldms_la_LIBADD = -ldl -lpthread $(top_builddir)/lib/src/coll/libcoll.la \
 		    $(top_builddir)/lib/src/mmalloc/libmmalloc.la \
 		    $(top_builddir)/lib/src/zap/libzap.la \
 		    $(top_builddir)/lib/src/ovis_log/libovis_log.la \
-		    @OPENSSL_LIBS@
+		    @OPENSSL_LIBS@ @LIBAVRO@ @LIBSERDES@
 
 lib_LTLIBRARIES += libldms.la

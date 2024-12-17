@@ -80,6 +80,7 @@
 #include "ldms_rail.h"
 #include "ldms_stream.h"
 #include "ldms_qgroup.h"
+#include "ldms_stream_avro_ser.h"
 
 /* The definition is in ldms.c. */
 extern int __enable_profiling[LDMS_XPRT_OP_COUNT];
@@ -628,6 +629,8 @@ __stream_deliver(struct __stream_buf_s *sbuf, uint64_t msg_gn,
 		.sbuf = sbuf,
 	};
 	json_entity_t json = NULL;
+	avro_value_t *av = NULL;
+	serdes_schema_t *ssch = NULL;
 
 	if (sbuf)
 		_ev.pub.recv.src = sbuf->msg->src;
@@ -693,7 +696,18 @@ __stream_deliver(struct __stream_buf_s *sbuf, uint64_t msg_gn,
 			gc = 1;
 			continue;
 		}
-		if (!json && stream_type == LDMS_STREAM_JSON && !c->x) {
+
+		if (c->is_python) {
+			/* data parsing for Python client is done in ldms.pyx */
+			goto skip_parse;
+		}
+		if (c->x) {
+			/* no need to parse data for remote client */
+			goto skip_parse;
+		}
+
+		/* JSON parsing */
+		if (!json && stream_type == LDMS_STREAM_JSON) {
 			/* json object is only required to parse once for
 			 * the local client */
 			struct json_parser_s *jp = json_parser_new(0);
@@ -708,6 +722,24 @@ __stream_deliver(struct __stream_buf_s *sbuf, uint64_t msg_gn,
 				goto cleanup;
 			}
 		}
+
+		/* AVRO/Serdes parsing */
+		if (!av && stream_type == LDMS_STREAM_AVRO_SER) {
+			/* avro value is only required to parse once for
+			 * the local client.
+			 *
+			 * The remote client does not need translation; we can
+			 * just forward it. */
+			rc = avro_value_from_stream_data(data, data_len,
+							 c->serdes,
+							 &av, &ssch);
+			if (rc)
+				continue;
+			_ev.pub.recv.avro_value = av;
+			_ev.pub.recv.serdes_schema = ssch;
+		}
+
+	skip_parse:
 		ref_get(&c->ref, "callback");
 		pthread_rwlock_unlock(&s->rwlock);
 		_ev.pub.recv.client = c;
@@ -730,6 +762,11 @@ __stream_deliver(struct __stream_buf_s *sbuf, uint64_t msg_gn,
  cleanup:
 	if (json)
 		json_entity_free(json);
+	if (av) {
+		/* av is a structrue allocated by avro_value_from_stream_data */
+		avro_value_decref(av);
+		free(av);
+	}
 	pthread_rwlock_unlock(&s->rwlock);
 	if (gc) {
 		/* remove unbound sce from s->client_tq */
@@ -1040,7 +1077,7 @@ static void __client_ref_free(void *arg)
 }
 
 /* subscribe the client to the streams */
-static int
+int
 __client_subscribe(struct ldms_stream_client_s *c)
 {
 	int rc = 0;
@@ -1089,7 +1126,7 @@ __client_subscribe(struct ldms_stream_client_s *c)
 	return rc;
 }
 
-static ldms_stream_client_t
+ldms_stream_client_t
 __client_alloc(const char *stream, int is_regex,
 	       ldms_stream_event_cb_t cb_fn, void *cb_arg,
 	       const char *desc)
@@ -1135,7 +1172,7 @@ __client_alloc(const char *stream, int is_regex,
 	return c;
 }
 
-static void
+void
 __client_free(ldms_stream_client_t c)
 {
 	ref_put(&c->ref, "init");
@@ -1157,6 +1194,34 @@ ldms_stream_subscribe(const char *stream, int is_regex,
 	c = __client_alloc(stream, is_regex, cb_fn, cb_arg, desc);
 	if (!c)
 		goto out;
+	rc = __client_subscribe(c);
+	if (rc) {
+		__client_free(c);
+		c = NULL;
+		errno = rc;
+	}
+
+ out:
+	return c;
+}
+
+ldms_stream_client_t
+ldms_stream_python_subscribe(const char *stream, int is_regex,
+		      ldms_stream_event_cb_t cb_fn, void *cb_arg,
+		      const char *desc)
+{
+	ldms_stream_client_t c = NULL;
+	int rc;
+
+	if (!cb_fn) {
+		errno = EINVAL;
+		goto out;
+	}
+
+	c = __client_alloc(stream, is_regex, cb_fn, cb_arg, desc);
+	if (!c)
+		goto out;
+	c->is_python = 1;
 	rc = __client_subscribe(c);
 	if (rc) {
 		__client_free(c);
