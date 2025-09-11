@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
  */
 #include "ldmsd.h"
+#include "ldmsd_jobmgr.h"
 
 ovis_log_t ldmsd_plug_log_get(ldmsd_plug_handle_t handle)
 {
@@ -16,6 +17,8 @@ ovis_log_t ldmsd_plug_log_get(ldmsd_plug_handle_t handle)
 		return ((ldmsd_cfgobj_sampler_t)cfg)->log;
 	case LDMSD_CFGOBJ_STORE:
 		return ((ldmsd_cfgobj_store_t)cfg)->log;
+	case LDMSD_CFGOBJ_JOBMGR:
+		return ((ldmsd_cfgobj_jobmgr_t)cfg)->log;
 	default:
 		ovis_log(NULL, OVIS_LERROR,
 			 "%s : handle is not a plugin cfgobj\n", __func__);
@@ -36,6 +39,9 @@ void ldmsd_plug_ctxt_set(ldmsd_plug_handle_t handle, void *context)
 	case LDMSD_CFGOBJ_STORE:
 		((ldmsd_cfgobj_store_t)cfg)->context = context;
 		break;
+	case LDMSD_CFGOBJ_JOBMGR:
+		((ldmsd_cfgobj_jobmgr_t)cfg)->context = context;
+		break;
 	default:
 		ovis_log(NULL, OVIS_LERROR,
 			 "ldmsd_plug_context_set(): handle is not a plugin cfgobj\n");
@@ -52,6 +58,8 @@ void *ldmsd_plug_ctxt_get(ldmsd_plug_handle_t handle)
 		return ((ldmsd_cfgobj_sampler_t)cfg)->context;
 	case LDMSD_CFGOBJ_STORE:
 		return ((ldmsd_cfgobj_store_t)cfg)->context;
+	case LDMSD_CFGOBJ_JOBMGR:
+		return ((ldmsd_cfgobj_jobmgr_t)cfg)->context;
 	default:
 		ovis_log(NULL, OVIS_LERROR,
 			 "%s() : handle is not a plugin cfgobj\n", __func__);
@@ -74,6 +82,8 @@ const char *ldmsd_plug_name_get(ldmsd_plug_handle_t handle)
 		return ((ldmsd_cfgobj_sampler_t)cfg)->plugin->name;
 	case LDMSD_CFGOBJ_STORE:
 		return ((ldmsd_cfgobj_store_t)cfg)->plugin->name;
+	case LDMSD_CFGOBJ_JOBMGR:
+		return ((ldmsd_cfgobj_jobmgr_t)cfg)->plugin->name;
 	default:
 		ovis_log(NULL, OVIS_LERROR,
 			 "%s : handle is not a plugin cfgobj\n", __func__);

@@ -256,6 +256,9 @@ OPTION_DEFAULT_ENABLE([csv], [ENABLE_CSV])
 OPTION_DEFAULT_DISABLE([rabbitkw], [ENABLE_RABBITKW])
 OPTION_DEFAULT_DISABLE([rabbitv3], [ENABLE_RABBITV3])
 
+dnl Options for jobmgr
+OPTION_DEFAULT_ENABLE([jobmgr], [ENABLE_JOBMGR])
+
 dnl AMQP
 OPTION_DEFAULT_DISABLE([amqp], [ENABLE_AMQP])
 
@@ -1099,6 +1102,8 @@ ldms/src/contrib/sampler/ipmireader/Makefile
 ldms/src/contrib/sampler/tutorial/Makefile
 ldms/src/contrib/sampler/variorum_sampler/Makefile
 ldms/src/contrib/sampler/geopm_sampler/Makefile
+ldms/src/jobmgr/Makefile
+ldms/src/jobmgr/slurm/Makefile
 ldms/src/third-plugins/Makefile
 ldms/src/ldmsd/Makefile
 ldms/src/ldmsd/test/Makefile

@@ -222,6 +222,10 @@ enum ldmsd_request {
 	LDMSD_MSG_CLIENT_STATS_REQ,  /* Query message client stats of this process */
 	LDMSD_MSG_DISABLE_REQ,       /* Disable message service */
 	LDMSD_MSG_ENABLE_REQ,	     /* Enable message service */
+
+	/* Job Manager jobmgr */
+	LDMSD_JOBMGR_START_REQ = 0xd00, /* Start jobmgr */
+	LDMSD_JOBMGR_STOP_REQ,          /* Stop jobmgr */
 };
 
 enum ldmsd_request_attr {

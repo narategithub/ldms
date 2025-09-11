@@ -75,6 +75,7 @@
 #include "ldmsd.h"
 #include "ldmsd_request.h"
 #include "ldmsd_stream.h"
+#include "ldmsd_jobmgr.h"
 
 #pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 /*
@@ -339,6 +340,10 @@ static int qgroup_member_del_handler(ldmsd_req_ctxt_t reqc);
 static int qgroup_start_handler(ldmsd_req_ctxt_t reqc);
 static int qgroup_stop_handler(ldmsd_req_ctxt_t reqc);
 static int qgroup_info_handler(ldmsd_req_ctxt_t reqc);
+
+/* Job Manager jobmgr */
+static int jobmgr_start_handler(ldmsd_req_ctxt_t reqc);
+static int jobmgr_stop_handler(ldmsd_req_ctxt_t reqc);
 
 /* executable for all */
 #define XALL 0111
@@ -779,6 +784,14 @@ static struct request_handler_entry request_handler[] = {
 	},
 	[LDMSD_QGROUP_INFO_REQ] = {
 		LDMSD_QGROUP_INFO_REQ, qgroup_info_handler, XUG
+	},
+
+	/* Job Manager jobmgr */
+	[LDMSD_JOBMGR_START_REQ] = {
+		LDMSD_JOBMGR_START_REQ, jobmgr_start_handler, XUG
+	},
+	[LDMSD_JOBMGR_STOP_REQ] = {
+		LDMSD_JOBMGR_STOP_REQ, jobmgr_stop_handler, XUG
 	},
 };
 
@@ -5473,8 +5486,12 @@ static int plugn_config_handler(ldmsd_req_ctxt_t reqc)
 	char *attr_copy = NULL;
 	size_t cnt = 0;
 	int multi_config;
-	ldmsd_cfgobj_sampler_t sampler;
-	ldmsd_cfgobj_store_t store;
+	ldmsd_cfgobj_sampler_t sampler = NULL;
+	ldmsd_cfgobj_store_t   store   = NULL;
+	ldmsd_cfgobj_jobmgr_t  jobmgr  = NULL;
+	ldmsd_plugin_t plug;
+	int *configured;
+	const char *ptype;
 
 	reqc->errcode = 0;
 
@@ -5484,39 +5501,49 @@ static int plugn_config_handler(ldmsd_req_ctxt_t reqc)
 		goto einval;
 
 	sampler = ldmsd_sampler_find_get(instance_name);
-	if (!sampler) {
-		store = ldmsd_store_find_get(instance_name);
-		if (!store) {
-			/* See if there is a */
-			reqc->errcode = ENOENT;
-			cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
-					"The specified plugin instance '%s' does not exist.",
-					instance_name);
-			goto send_reply;
-		}
-		multi_config = store->api->base.flags & LDMSD_PLUGIN_MULTI_INSTANCE;
-		if (!multi_config && store->configured) {
-			reqc->errcode = EINVAL;
-			cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
-				       "The store '%s' does not support multiple "
-				       "configurations.\n",
-				       instance_name);
-			goto send_reply;
-		}
-		cfg = &store->cfg;
-		ldmsd_store_find_put(store);
-	} else {
-		multi_config = sampler->api->base.flags & LDMSD_PLUGIN_MULTI_INSTANCE;
-		if (!multi_config && sampler->configured) {
-			reqc->errcode = EINVAL;
-			cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
-				       "The sampler '%s' does not support multiple "
-				       "configurations.\n",
-				       instance_name);
-			goto send_reply;
-		}
+	if (sampler) {
 		cfg = &sampler->cfg;
-		ldmsd_sampler_find_put(sampler);
+		plug = &sampler->api->base;
+		configured = &sampler->configured;
+		ptype = "sampler";
+		goto found;
+	}
+
+	store = ldmsd_store_find_get(instance_name);
+	if (store) {
+		cfg = &store->cfg;
+		plug = &store->api->base;
+		configured = &store->configured;
+		ptype = "store";
+		goto found;
+	}
+
+	jobmgr = ldmsd_jobmgr_find_get(instance_name);
+	if (jobmgr) {
+		cfg = &jobmgr->cfg;
+		plug = &jobmgr->api->base;
+		configured = &jobmgr->configured;
+		ptype = "jobmgr";
+		goto found;
+	}
+
+	/* no plugin found */
+	reqc->errcode = ENOENT;
+	cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
+			"The specified plugin instance '%s' does not exist.",
+			instance_name);
+	goto send_reply;
+
+ found:
+	multi_config = plug->flags & LDMSD_PLUGIN_MULTI_INSTANCE;
+	if (!multi_config && *configured) {
+		reqc->errcode = EINVAL;
+		cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
+			       "The %s '%s' does not support multiple "
+			       "configurations.\n",
+			       ptype, instance_name);
+		ldmsd_cfgobj_find_put(cfg);
+		goto send_reply;
 	}
 
 	config_attr = ldmsd_req_attr_str_value_get_by_id(reqc, LDMSD_ATTR_STRING);
@@ -5524,6 +5551,7 @@ static int plugn_config_handler(ldmsd_req_ctxt_t reqc)
 		cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
 				"No config attributes are provided.");
 		reqc->errcode = EINVAL;
+		ldmsd_cfgobj_find_put(cfg);
 		goto send_reply;
 	}
 
@@ -5550,6 +5578,7 @@ static int plugn_config_handler(ldmsd_req_ctxt_t reqc)
 	if (!av_list || !kw_list || !attr_copy) {
 		cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
 				"Out of memory");
+		ldmsd_cfgobj_find_put(cfg);
 		goto send_reply;
 	}
 
@@ -5560,6 +5589,7 @@ static int plugn_config_handler(ldmsd_req_ctxt_t reqc)
 		cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
 				"Out of memory");
 		reqc->errcode = ENOMEM;
+		ldmsd_cfgobj_find_put(cfg);
 		goto send_reply;
 	}
 
@@ -5572,25 +5602,18 @@ static int plugn_config_handler(ldmsd_req_ctxt_t reqc)
 	if (exclusive_thread && sampler)
 		sampler->use_xthread = atoi(exclusive_thread);
 
-	if (sampler) {
-		reqc->errcode = sampler->api->base.config((ldmsd_cfgobj_t)sampler, kw_list, av_list);
-		if (!reqc->errcode) {
-			sampler->configured = 1;
-		}
-	} else {
-		reqc->errcode = store->api->base.config((ldmsd_cfgobj_t)store, kw_list, av_list);
-		if (!reqc->errcode) {
-			store->configured = 1;
-		}
-	}
+	reqc->errcode = plug->config(cfg, kw_list, av_list);
+
 	if (reqc->errcode) {
 		cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
 				"Error %d configuring plugin instance '%s'.",
 				reqc->errcode, instance_name);
 	} else {
+		*configured = 1;
 		__dlog(DLOG_CFGOK, "config name=%s %s\n", instance_name,
 			attr_copy);
 	}
+	ldmsd_cfgobj_find_put(cfg);
 	goto send_reply;
 
 einval:
@@ -5599,6 +5622,7 @@ einval:
 			"The attribute '%s' is required by config.",
 			attr_name);
 	goto send_reply;
+
 send_reply:
 	ldmsd_send_req_response(reqc, reqc->line_buf);
 	free(instance_name);
@@ -11388,4 +11412,64 @@ static int qgroup_info_handler(ldmsd_req_ctxt_t reqc)
 		ldmsd_send_req_response(reqc, reqc->line_buf);
 	}
 	return rc;
+}
+
+static int jobmgr_op(ldmsd_req_ctxt_t reqc, const char *op_name,
+		     int (*op)(ldmsd_cfgobj_jobmgr_t))
+{
+	char *instance_name;
+	char *config_attr = NULL;
+	char *attr_name;
+	struct attr_value_list *av_list = NULL;
+	struct attr_value_list *kw_list = NULL;
+	ldmsd_cfgobj_jobmgr_t jm;
+	char *attr_copy = NULL;
+	size_t cnt = 0;
+
+	reqc->errcode = 0;
+
+	attr_name = "name";
+	instance_name = ldmsd_req_attr_str_value_get_by_id(reqc, LDMSD_ATTR_NAME);
+	if (!instance_name) {
+		reqc->errcode = EINVAL;
+		cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
+				"The attribute '%s' is required by config.",
+				attr_name);
+		goto send_reply;
+	}
+	jm = ldmsd_jobmgr_find_get(instance_name);
+	if (!jm) {
+		reqc->errcode = ENOENT;
+		cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
+			"jobmgr '%s' not found", instance_name);
+		goto send_reply;
+	}
+
+	reqc->errcode = op(jm);
+	ldmsd_jobmgr_find_put(jm);
+	if (reqc->errcode) {
+		cnt = Snprintf(&reqc->line_buf, &reqc->line_len,
+			"jobmgr %s %s error: %d", instance_name,
+			op_name, reqc->errcode);
+		goto send_reply;
+	}
+
+ send_reply:
+	ldmsd_send_req_response(reqc, reqc->line_buf);
+	free(instance_name);
+	free(config_attr);
+	av_free(kw_list);
+	av_free(av_list);
+	free(attr_copy);
+	return 0;
+}
+
+static int jobmgr_start_handler(ldmsd_req_ctxt_t reqc)
+{
+	return jobmgr_op(reqc, "start", ldmsd_jobmgr_start);
+}
+
+static int jobmgr_stop_handler(ldmsd_req_ctxt_t reqc)
+{
+	return jobmgr_op(reqc, "stop", ldmsd_jobmgr_stop);
 }

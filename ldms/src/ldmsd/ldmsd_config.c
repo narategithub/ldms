@@ -79,6 +79,7 @@
 #include "ldms.h"
 #include "ldmsd.h"
 #include "ldmsd_request.h"
+#include "ldmsd_jobmgr.h"
 #include "config.h"
 
 extern void cleanup(int x, char *reason);
@@ -317,6 +318,49 @@ ldmsd_store_add(const char *cfg_name,
 	return NULL;
 }
 
+ldmsd_cfgobj_jobmgr_t
+ldmsd_jobmgr_add(const char *cfg_name,
+		 struct ldmsd_plugin_generic *plugin,
+		 ldmsd_cfgobj_del_fn_t __del,
+		 uid_t uid, gid_t gid, int perm)
+{
+	int rc;
+	ldmsd_cfgobj_jobmgr_t jm;
+	char log_name[4096];
+
+	jm = (void*)ldmsd_cfgobj_new_with_auth(cfg_name, LDMSD_CFGOBJ_JOBMGR,
+						sizeof(*jm),
+						__del, uid, gid, perm);
+	if (!jm) {
+		ovis_log(config_log, OVIS_LERROR,
+			"Error %d creating the jobmgr configuration object '%s'\n",
+			 errno, cfg_name);
+		return NULL;
+	}
+	sprintf(log_name, "jobmgr.%s.%s", plugin->name, cfg_name);
+	jm->log = ovis_log_register(log_name, "jobmgr logger");
+	if (!jm->log)
+		ovis_log(NULL, OVIS_LWARN,
+			 "Error %d creating the log for config '%s' of the '%s' plugin.\n",
+			 errno, cfg_name, plugin->name);
+        jm->plugin = plugin;
+	jm->api = (struct ldmsd_jobmgr *)plugin->api;
+	if (jm->api->base.constructor != NULL) {
+		rc = jm->api->base.constructor(&jm->cfg);
+		if (rc)
+			goto err;
+	}
+#ifdef _CFG_REF_DUMP_
+	ref_dump(&jm->cfg.ref, jm->cfg.name, stderr);
+#endif
+	ldmsd_cfgobj_unlock(&jm->cfg);
+	return jm;
+ err:
+	ldmsd_cfgobj_del(&jm->cfg);
+	errno = rc;
+	return NULL;
+}
+
 const char *prdcr_state_str(enum ldmsd_prdcr_state state)
 {
 	switch (state) {
@@ -384,6 +428,16 @@ void ldmsd_store___del(ldmsd_cfgobj_t obj)
 	ldmsd_cfgobj___del(obj);
 }
 
+void ldmsd_jobmgr___del(ldmsd_cfgobj_t obj)
+{
+	ldmsd_cfgobj_jobmgr_t jm = (void*)obj;
+	if (jm->plugin->api->destructor)
+		jm->plugin->api->destructor(obj);
+        unload_plugin(jm->plugin);
+        ovis_log_deregister(jm->log);
+	ldmsd_cfgobj___del(obj);
+}
+
 /*
  * Load a plugin
  */
@@ -393,6 +447,7 @@ int ldmsd_load_plugin(char *cfg_name, char *plugin_name,
         struct ldmsd_plugin_generic *plugin;
 	ldmsd_cfgobj_sampler_t sampler;
 	ldmsd_cfgobj_store_t store;
+	ldmsd_cfgobj_jobmgr_t jm;
 
 	if (!plugin_name || !cfg_name)
 		return EINVAL;
@@ -430,6 +485,18 @@ int ldmsd_load_plugin(char *cfg_name, char *plugin_name,
 			goto err;
 		}
 		ldmsd_store_get(store, "load");
+		break;
+	case LDMSD_PLUGIN_JOBMGR:
+		jm = ldmsd_jobmgr_add(cfg_name, plugin, ldmsd_jobmgr___del,
+				      geteuid(), getegid(), 0660);
+		if (!jm) {
+			snprintf(errstr, errlen,
+				 "Error %d adding jobmgr named '%s' "
+				 "with plugin '%s'\n", errno, cfg_name,
+				 plugin_name);
+			goto err;
+		}
+		ldmsd_jobmgr_get(jm, "load");
 		break;
 	default:
 		errno = EINVAL;

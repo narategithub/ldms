@@ -19,4 +19,8 @@ libtest_sampler_la_SOURCES = test_sampler.c
 libtest_sampler_la_LIBADD = $(COMMON_LIBADD) $(top_builddir)/lib/src/ovis_json/libovis_json.la
 
 pkglib_LTLIBRARIES += libtest_sampler.la
+
+libtest_jobmgr_sampler_la_SOURCES = test_jobmgr_sampler.c
+libtest_jobmgr_sampler_la_LIBADD = $(COMMON_LIBADD)
+pkglib_LTLIBRARIES += libtest_jobmgr_sampler.la
 endif

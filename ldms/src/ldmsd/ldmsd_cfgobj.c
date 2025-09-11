@@ -93,6 +93,9 @@ static pthread_mutex_t auth_tree_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct rbt listen_prdcr_tree = RBT_INITIALIZER(cfgobj_cmp);
 static pthread_mutex_t listen_prdcr_tree_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static struct rbt jobmgr_tree = RBT_INITIALIZER(cfgobj_cmp);
+static pthread_mutex_t jobmgr_tree_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static pthread_mutex_t *cfgobj_locks[] = {
 	[LDMSD_CFGOBJ_PRDCR] = &prdcr_tree_lock,
 	[LDMSD_CFGOBJ_UPDTR] = &updtr_tree_lock,
@@ -102,6 +105,7 @@ static pthread_mutex_t *cfgobj_locks[] = {
 	[LDMSD_CFGOBJ_LISTEN] = &listen_tree_lock,
 	[LDMSD_CFGOBJ_AUTH]   = &auth_tree_lock,
 	[LDMSD_CFGOBJ_PRDCR_LISTEN] = &listen_prdcr_tree_lock,
+	[LDMSD_CFGOBJ_JOBMGR]   = &jobmgr_tree_lock,
 };
 
 struct rbt *cfgobj_trees[] = {
@@ -113,6 +117,7 @@ struct rbt *cfgobj_trees[] = {
 	[LDMSD_CFGOBJ_LISTEN] = &listen_tree,
 	[LDMSD_CFGOBJ_AUTH]   = &auth_tree,
 	[LDMSD_CFGOBJ_PRDCR_LISTEN] = &listen_prdcr_tree,
+	[LDMSD_CFGOBJ_JOBMGR]   = &jobmgr_tree,
 };
 
 void ldmsd_cfgobj___del(ldmsd_cfgobj_t obj)
@@ -183,7 +188,8 @@ static const char *__cfgobj_type_str[] = {
 	[LDMSD_CFGOBJ_AUTH]   = "auth",
         [LDMSD_CFGOBJ_PRDCR_LISTEN] = "prdcr_listen",
         [LDMSD_CFGOBJ_SAMPLER] = "sampler",
-        [LDMSD_CFGOBJ_STORE] = "store"
+        [LDMSD_CFGOBJ_STORE] = "store",
+        [LDMSD_CFGOBJ_JOBMGR]   = "jobmgr"
 
 };
 
