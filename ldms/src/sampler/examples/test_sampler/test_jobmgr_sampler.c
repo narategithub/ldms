@@ -108,6 +108,7 @@ void print_jobset(char *buf, size_t bufsz, const struct ldmsd_jobmgr_event *ev)
 
 void print_task(char *buf, size_t bufsz, const struct ldmsd_jobmgr_event *ev)
 {
+	ldms_mval_t job_id = ldmsd_jobset_mval(ev->jobset, JOB_ID);
 	ldms_mval_t task_id = ldmsd_task_rec_mval(ev->task_record, TASK_ID);
 	ldms_mval_t task_pid = ldmsd_task_rec_mval(ev->task_record, TASK_PID);
 	ldms_mval_t task_rank = ldmsd_task_rec_mval(ev->task_record, TASK_RANK);
@@ -117,13 +118,15 @@ void print_task(char *buf, size_t bufsz, const struct ldmsd_jobmgr_event *ev)
 
 	snprintf(buf, bufsz,
 			"{"
-			"\"task_id\":\"%s\""
+		        "\"job_id\":\"%s\""
+			",\"task_id\":\"%s\""
 			",\"task_pid\":%lu"
 			",\"task_rank\":%u"
 			",\"task_start\":%u.%06u"
 			",\"task_end\":%u.%06u"
 			",\"task_exit_status\":%d"
 			"}"
+			, job_id->a_char
 			, task_id->a_char
 			, task_pid->v_u64
 			, task_rank->v_u32

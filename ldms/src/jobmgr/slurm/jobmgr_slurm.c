@@ -56,8 +56,6 @@
 
 #include "ovis_json/ovis_json.h"
 
-#define PNAME "jobmgr_slurm"
-
 #ifndef ARRAY_LEN
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
 #endif /* ARRAY_LEN */
@@ -166,7 +164,7 @@ struct jobmgr_slurm {
 typedef struct jobmgr_slurm *jobmgr_slurm_t;
 
 static const char *usage_str =
-"config inst=NAME plugin="PNAME" message_channel=CH_NAME\n"
+"config inst=NAME message_channel=CH_NAME component_id=COMPONENT_ID\n"
 ;
 
 static const char *usage(ldmsd_plug_handle_t p)
@@ -358,6 +356,7 @@ typedef struct job_data {
 	ldms_mval_t mv_job_tag;
 
 	ldms_mval_t rec_inst;
+	int init_posted;
 	int exited;	/* True if this job is on the deleting list */
 	/*
 	 * \c exited_tasks_count is the number of tasks that have been exited already.
@@ -406,6 +405,8 @@ static task_data_t task_data_alloc(jobmgr_slurm_t js, job_data_t job, uint64_t t
 	task->mv_task_start = __task_metric(rec, &task_midx_cache[3], "task_start");
 	task->mv_task_end = __task_metric(rec, &task_midx_cache[4], "task_end");
 	task->mv_task_exit_status = __task_metric(rec, &task_midx_cache[5], "task_exit_status");
+
+	task->mv_step_id = __task_metric(rec, &task_midx_cache[6], "step_id");
 
 	pthread_mutex_lock(&job->mutex);
 	ldms_list_append_record(job->set, job->mv_task_list, task->task_rec);
@@ -608,21 +609,6 @@ static void handle_job_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 
 	ldms_transaction_end(job->set);
 
-	/* post JOB_START event */
-	struct ldmsd_jobmgr_event ev = {
-		.type   = LDMSD_JOBMGR_JOB_START,
-		.jobset = job->set,
-		.mgr    = js->plug,
-	};
-
-	ldms_set_ref_get(job->set, "jobmgr_event");
-	ldmsd_jobmgr_get(js->plug, "jobmgr_event");
-
-	int rc = ldmsd_jobmgr_event_post(&ev);
-	if (rc) {
-		ldms_set_ref_put(job->set, "jobmgr_event");
-		ldmsd_jobmgr_put(js->plug, "jobmgr_event");
-	}
 	return;
 
  err:
@@ -721,6 +707,32 @@ static void handle_step_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 	}
 
 	ldms_transaction_end(job->set);
+
+	/* We may have multiple step init events in a job.
+	 * The only first one shall result in "job_start" event.
+	 * The slurm "job_init" event does not have all job info available
+	 * (e.g. "local_tasks" value being 0), and those information are
+	 * available in "step_init".
+	 */
+	int init_posted = 0;
+	if (0 == __atomic_compare_exchange_n(&job->init_posted, &init_posted, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+		return; /* init event alread posted */
+
+	/* post JOB_START event */
+	struct ldmsd_jobmgr_event ev = {
+		.type   = LDMSD_JOBMGR_JOB_START,
+		.jobset = job->set,
+		.mgr    = js->plug,
+	};
+
+	ldms_set_ref_get(job->set, "jobmgr_event");
+	ldmsd_jobmgr_get(js->plug, "jobmgr_event");
+
+	int rc = ldmsd_jobmgr_event_post(&ev);
+	if (rc) {
+		ldms_set_ref_put(job->set, "jobmgr_event");
+		ldmsd_jobmgr_put(js->plug, "jobmgr_event");
+	}
 }
 
 static void handle_task_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
@@ -787,8 +799,11 @@ static void handle_task_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 	task->mv_task_start->v_ts.usec = 0;
 	task->mv_task_pid->v_u64 = task_pid;
 	task->mv_task_rank->v_u64 = task_rank;
+	task->mv_step_id->v_u64 = job->mv_job_step_id->v_u64;
 
-	snprintf(task->mv_task_id->a_char, LDMSD_JOBSET_TASK_ID_LEN, "%lu", task_id);
+	/* prepend the step_id to task_id */
+	snprintf(task->mv_task_id->a_char, LDMSD_JOBSET_TASK_ID_LEN,
+		 "%lu_%lu", task->mv_step_id->v_u64, task_id);
 
 	ldms_transaction_end(job->set);
 
