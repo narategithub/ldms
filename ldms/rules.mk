@@ -11,11 +11,4 @@
 	@set -e; \
 	if $(AM_V_P); then set -x; else echo "  RST2MAN  $@"; fi; \
 	mkdir -p $(dir $@); \
-	sed -e 's/:ref:`\([^`]*\)<[^`]*>`/\1/g' $< | @RST2MAN@ | sed -e 's/\\\([`'\''\-]\)/\1/g' \
-		-e '/rst2man/d' \
-		-e '/rstR/d' \
-		-e '/. RS/d' \
-		-e '/. RE/d' \
-		-e '/^\s*\.\.\s*$$/d' \
-		-e '/an-margin/d' \
-		-e '/INDENT/d' > $@
+	sed -e 's/:ref:`\([^`]*\)<[^`]*>`/\1/g' $< | @RST2MAN@ > $@
