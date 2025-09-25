@@ -182,16 +182,28 @@ static const char *usage(ldmsd_plug_handle_t p)
 static int config(ldmsd_plug_handle_t p, struct attr_value_list *kwl, struct attr_value_list *avl)
 {
 	jobmgr_slurm_t js = ldmsd_plug_ctxt_get(p);
-	char *chan = av_value(avl, "message_channel");
-	if (!chan) {
+	char *val;
+	val = av_value(avl, "message_channel");
+	if (!val) {
 		if (errno == ENOMEM)
 			goto enomem;
-		chan = strdup("slurm"); /* default */
-		if (!chan) {
+		val = strdup("slurm"); /* default */
+		if (!val) {
 			goto enomem;
 		}
 	}
-	js->ch_name = chan;
+	js->ch_name = val;
+
+	val = av_value(avl, "component_id");
+	if (!val) {
+		if (errno == ENOMEM)
+			goto enomem;
+		val = strdup(ldmsd_myname_get());
+		if (!val)
+			goto enomem;
+	}
+	js->component_id = val;
+
 	return 0;
  enomem:
 	LOG_ERROR(p, "Not enough memory.\n");
@@ -498,6 +510,16 @@ static job_data_t __job_data_alloc(jobmgr_slurm_t js, uint64_t job_id)
 	/* use u64 job_id as key */
 	rbn_init(&job->rbn, &job->job_id);
 	rbt_ins(&js->job_tree, &job->rbn);
+
+	/* set job_id */
+	snprintf(job->mv_job_id->a_char, LDMSD_JOBSET_JOB_ID_LEN, "%s", buf);
+
+	/* set values that can be set from js config */
+	if (js->component_id) {
+		snprintf(job->mv_component_id->a_char,
+			 LDMSD_JOBSET_COMPONENT_ID_LEN,
+			 "%s", js->component_id);
+	}
 
 	ldms_set_publish(job->set);
 
