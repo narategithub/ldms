@@ -406,7 +406,6 @@ ldms_set_t ldmsd_jobset_next(ldms_set_t set)
 	JOBSET_RBT_LOCK();
 	mval = ldmsd_jobset_mval(set, JOB_ID);
 	rbn = rbt_find_lub(&jobset_rbt, mval);
-	rbn = rbt_min(&jobset_rbt);
  again:
 	if (rbn) {
 		next_set = container_of(rbn, struct jobset_s, rbn)->set;
@@ -417,6 +416,7 @@ ldms_set_t ldmsd_jobset_next(ldms_set_t set)
 		ldms_set_ref_get(next_set, "jobset_iter");
 	} else {
 		errno = ENOENT;
+		next_set = NULL;
 	}
 	JOBSET_RBT_UNLOCK();
 
