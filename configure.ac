@@ -558,6 +558,9 @@ OPTION_ARIES_MMR
 dnl munge
 OPTION_WITH_CHECK([munge], [MUNGE], [munge.h], [munge], [munge_encode])
 
+dnl flux
+OPTION_WITH_CHECK([flux], [FLUX], [flux/core.h], [flux-core], [flux_plugin_register])
+
 LDMSD_PLUGIN_LIBPATH=${pkglibdir}
 AC_SUBST(LDMSD_PLUGIN_LIBPATH)
 
@@ -1104,6 +1107,7 @@ ldms/src/contrib/sampler/variorum_sampler/Makefile
 ldms/src/contrib/sampler/geopm_sampler/Makefile
 ldms/src/jobmgr/Makefile
 ldms/src/jobmgr/slurm/Makefile
+ldms/src/jobmgr/flux/Makefile
 ldms/src/third-plugins/Makefile
 ldms/src/ldmsd/Makefile
 ldms/src/ldmsd/test/Makefile
