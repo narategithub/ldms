@@ -78,6 +78,94 @@ static struct ldms_metric_template_s slurm_task_rec_metrics[] = {
 	{0}
 };
 
+enum jobmgr_slurm_metric_e {
+
+	JOBMGR_SLURM_METRIC_JOB_ID = 0x1,
+	JOBMGR_SLURM_METRIC_USER,
+	JOBMGR_SLURM_METRIC_JOB_NAME,
+	JOBMGR_SLURM_METRIC_JOB_UID,
+	JOBMGR_SLURM_METRIC_JOB_GID,
+	JOBMGR_SLURM_METRIC_JOB_START,
+	JOBMGR_SLURM_METRIC_JOB_END,
+	JOBMGR_SLURM_METRIC_NODE_COUNT,
+	JOBMGR_SLURM_METRIC_JOB_TAG,
+
+	JOBMGR_SLURM_METRIC_STEP_ID = 0x101,
+	JOBMGR_SLURM_METRIC_STEP_START,
+	JOBMGR_SLURM_METRIC_STEP_END,
+	JOBMGR_SLURM_METRIC_TOTAL_TASKS,
+	JOBMGR_SLURM_METRIC_LOCAL_TASKS,
+
+	JOBMGR_SLURM_METRIC_TASK_ID = 0x201,
+	JOBMGR_SLURM_METRIC_TASK_PID,
+	JOBMGR_SLURM_METRIC_TASK_RANK,
+	JOBMGR_SLURM_METRIC_TASK_START,
+	JOBMGR_SLURM_METRIC_TASK_END,
+	JOBMGR_SLURM_METRIC_TASK_EXIT_STATUS,
+
+};
+
+struct jobmgr_slurm_mdesc_s {
+	const char *name;
+	enum ldms_value_type v_type;
+	const char *unit;
+	int len;
+	enum jobmgr_slurm_metric_e m_type;
+};
+
+/* This will be q-sorted by __constructor__ */
+struct jobmgr_slurm_mdesc_s jobmgr_slurm_mdesc_tbl[] = {
+	{ "job_id",   LDMS_V_CHAR_ARRAY, NULL,
+		      LDMSD_JOBMGR_JOB_ID_LEN, JOBMGR_SLURM_METRIC_JOB_ID },
+
+	{ "user",     LDMS_V_CHAR_ARRAY, NULL,
+		      LDMSD_JOBMGR_USER_LEN, JOBMGR_SLURM_METRIC_USER },
+
+	{ "job_name", LDMS_V_CHAR_ARRAY, NULL,
+		      LDMSD_JOBMGR_JOB_NAME_LEN, JOBMGR_SLURM_METRIC_USER },
+
+	{ "job_uid",    LDMS_V_U32,       NULL, 1, JOBMGR_SLURM_METRIC_JOB_UID    },
+	{ "job_gid",    LDMS_V_U32,       NULL, 1, JOBMGR_SLURM_METRIC_JOB_GID    },
+	{ "job_start",  LDMS_V_TIMESTAMP, NULL, 1, JOBMGR_SLURM_METRIC_JOB_START  },
+	{ "job_end",    LDMS_V_TIMESTAMP, NULL, 1, JOBMGR_SLURM_METRIC_JOB_END    },
+	{ "node_count", LDMS_V_U32,       NULL, 1, JOBMGR_SLURM_METRIC_NODE_COUNT },
+
+	{ "step_id", LDMS_V_CHAR_ARRAY, NULL,
+		     LDMSD_JOBMGR_STEP_ID_LEN, JOBMGR_SLURM_METRIC_STEP_ID },
+	{ "step_start",       LDMS_V_TIMESTAMP,  NULL, 1, JOBMGR_SLURM_METRIC_STEP_START },
+	{ "step_end",         LDMS_V_TIMESTAMP,  NULL, 1, JOBMGR_SLURM_METRIC_STEP_END },
+
+	{ "total_tasks", LDMS_V_U32, NULL, 1, JOBMGR_SLURM_METRIC_TOTAL_TASKS },
+	{ "local_tasks", LDMS_V_U32, NULL, 1, JOBMGR_SLURM_METRIC_LOCAL_TASKS },
+
+	{ "task_id", LDMS_V_CHAR_ARRAY, NULL,
+		     LDMSD_JOBMGR_TASK_ID_LEN, JOBMGR_SLURM_METRIC_TASK_ID },
+
+	{ "task_pid",         LDMS_V_U64,        NULL, 1, JOBMGR_SLURM_METRIC_TASK_PID },
+	{ "task_rank",        LDMS_V_U32,        NULL, 1, JOBMGR_SLURM_METRIC_TASK_RANK },
+	{ "task_start",       LDMS_V_TIMESTAMP,  NULL, 1, JOBMGR_SLURM_METRIC_TASK_START },
+	{ "task_end",         LDMS_V_TIMESTAMP,  NULL, 1, JOBMGR_SLURM_METRIC_TASK_END },
+	{ "task_exit_status", LDMS_V_S32,        NULL, 1, JOBMGR_SLURM_METRIC_TASK_EXIT_STATUS },
+};
+
+static int __mdesc_key_cmp(const void *_k, const void *_e)
+{
+	const char *a = _k;
+	const struct jobmgr_slurm_mdesc_s *e = _e;
+	return strcmp(a, e->name);
+}
+
+static const struct jobmgr_slurm_mdesc_s *
+jobmgr_slurm_mdesc_find(const char *name)
+{
+	const struct jobmgr_slurm_mdesc_s *ent;
+	ent = bsearch(name, jobmgr_slurm_mdesc_tbl,
+		sizeof(jobmgr_slurm_mdesc_tbl)/sizeof(jobmgr_slurm_mdesc_tbl[0]),
+		sizeof(jobmgr_slurm_mdesc_tbl[0]),
+		__mdesc_key_cmp);
+	return ent;
+}
+
 int u32_node_cmp(void *a, const void *b)
 {
 	uint32_t l = *(uint32_t*)a;
@@ -99,33 +187,6 @@ int u64_node_cmp(void *a, const void *b)
 		return 1;
 	return 0;
 }
-
-enum job_metric_order {
-	JM_FIRST = 0,
-	JOB_ID = 0,
-	APP_ID,
-	USER,
-	JOB_NAME,
-	JOB_TAG,
-	JOB_STATE,
-	JOB_SIZE,
-	JOB_UID,
-	JOB_GID,
-	JOB_START,
-	JOB_END,
-	NODE_COUNT,
-	TASK_COUNT,
-	JM_LAST,
-};
-
-enum task_metric_order {
-	TM_FIRST = 0,
-	TASK_JOB_ID = 0,
-	TASK_PID,
-	TASK_RANK,
-	TASK_EXIT_STATUS,
-	TM_LAST,
-};
 
 typedef enum jobmgr_slurm_state_e {
 	JOBMGR_SLURM_STOPPED,
@@ -212,7 +273,16 @@ static int config(ldmsd_plug_handle_t p, struct attr_value_list *kwl, struct att
 
 static int constructor(ldmsd_plug_handle_t p)
 {
+	int rc;
 	jobmgr_slurm_t js;
+	struct ldms_metric_template_s tmp = {
+		"job_tag", LDMS_MDESC_F_DATA, LDMS_V_CHAR_ARRAY, NULL, JOB_TAG_STR_LEN, NULL
+	};
+
+	rc = ldmsd_jobmgr_metric_register(&tmp);
+	if (rc)
+		return rc;
+
 	js = calloc(1, sizeof(*js));
 	if (!js)
 		return ENOMEM;
@@ -321,22 +391,6 @@ static int jobmgr_slurm_transition(jobmgr_slurm_t js,
 	return success;
 }
 
-typedef struct task_data {
-	uint64_t task_pid;
-
-	ldms_mval_t mv_task_id; /* S_TASK_ID int */
-	ldms_mval_t mv_task_pid;
-	ldms_mval_t mv_task_rank;
-	ldms_mval_t mv_task_start;
-	ldms_mval_t mv_task_end;
-	ldms_mval_t mv_task_exit_status;
-
-	ldms_mval_t mv_step_id;
-
-	ldms_mval_t task_rec;
-	struct rbn rbn;
-} *task_data_t;
-
 typedef struct job_data {
 	enum slurm_job_state {
 		JOB_FREE = 0,
@@ -376,10 +430,56 @@ typedef struct job_data {
 	 * This is to handle the jobs started by srun.
 	 */
 	int exited_tasks_count;
-	struct rbt task_rbt;
 	struct rbn rbn;
-	TAILQ_ENTRY(job_data) ent; /* stopped_job_list entry */
+
+	char user[LDMSD_JOBMGR_USER_LEN];
+	char job_name[LDMSD_JOBMGR_JOB_NAME_LEN];
+	char job_tag[JOB_TAG_STR_LEN];
+	uid_t job_uid;
+	gid_t job_gid;
+	struct ldms_timestamp job_start;
+	struct ldms_timestamp job_end;
+	int node_count;
+	struct rbt step_rbt; /* key is &step->step_id */
+
 } *job_data_t;
+
+typedef struct step_data {
+	struct rbn rbn; /* key is &step_id */
+	job_data_t job; /* refers back to job */
+	uint64_t step_id;
+	struct ldms_timestamp step_start;
+	struct ldms_timestamp step_end;
+	int total_tasks;
+	int local_tasks;
+	struct rbt task_rbt; /* key is &task->task_id */
+} *step_data_t;
+
+typedef struct task_data {
+
+	ldms_mval_t mv_task_id; /* S_TASK_ID int */
+	ldms_mval_t mv_task_pid;
+	ldms_mval_t mv_task_rank;
+	ldms_mval_t mv_task_start;
+	ldms_mval_t mv_task_end;
+	ldms_mval_t mv_task_exit_status;
+
+	ldms_mval_t mv_step_id;
+
+	ldms_mval_t task_rec;
+	struct rbn rbn;
+
+	step_data_t step; /* refers back to step */
+	uint64_t task_id;
+	uint64_t task_pid;
+	uint32_t task_rank;
+	struct ldms_timestamp task_start;
+	struct ldms_timestamp task_end;
+	int task_exit_status;
+
+} *task_data_t;
+
+static step_data_t step_data_get(job_data_t job, uint64_t step_id);
 
 static int task_midx_cache[10] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 static inline
@@ -398,9 +498,15 @@ static inline void task_data_free(task_data_t task)
 	free(task);
 }
 
-static task_data_t task_data_alloc(jobmgr_slurm_t js, job_data_t job, uint64_t task_pid)
+static task_data_t task_data_alloc(jobmgr_slurm_t js, job_data_t job, uint64_t step_id, uint64_t task_pid)
 {
 	ldms_mval_t rec;
+	step_data_t step;
+
+	step = step_data_get(job, step_id);
+	if (!step)
+		return NULL;
+
 	task_data_t task = calloc(1, sizeof(*task));
 	if (!task)
 		return NULL;
@@ -421,8 +527,9 @@ static task_data_t task_data_alloc(jobmgr_slurm_t js, job_data_t job, uint64_t t
 	task->mv_step_id = __task_metric(rec, &task_midx_cache[6], "step_id");
 
 	pthread_mutex_lock(&job->mutex);
+	task->step = step;
 	ldms_list_append_record(job->set, job->mv_task_list, task->task_rec);
-	rbt_ins(&job->task_rbt, &task->rbn);
+	rbt_ins(&step->task_rbt, &task->rbn);
 	pthread_mutex_unlock(&job->mutex);
 
 	return task;
@@ -431,9 +538,21 @@ static task_data_t task_data_alloc(jobmgr_slurm_t js, job_data_t job, uint64_t t
 	return NULL;
 }
 
-static void job_data_free(jobmgr_slurm_t js, job_data_t job)
+static void step_data_free(step_data_t step)
 {
 	task_data_t task;
+	struct rbn *rbn;
+	while ((rbn = rbt_min(&step->task_rbt))) {
+		rbt_del(&step->task_rbt, rbn);
+		task = container_of(rbn, struct task_data, rbn);
+		task_data_free(task);
+	}
+	free(step);
+}
+
+static void job_data_free(jobmgr_slurm_t js, job_data_t job)
+{
+	step_data_t step;
 	struct rbn *rbn;
 
 	pthread_mutex_lock(&js->mutex);
@@ -444,10 +563,10 @@ static void job_data_free(jobmgr_slurm_t js, job_data_t job)
 	ldmsd_jobset_delete(job->set);
 	job->set = NULL;
 
-	while ((rbn = rbt_min(&job->task_rbt))) {
-		rbt_del(&job->task_rbt, rbn);
-		task = container_of(rbn, struct task_data, rbn);
-		task_data_free(task);
+	while ((rbn = rbt_min(&job->step_rbt))) {
+		rbt_del(&job->step_rbt, rbn);
+		step = container_of(rbn, struct step_data, rbn);
+		step_data_free( step);
 	}
 
 	free(job);
@@ -478,6 +597,10 @@ static job_data_t __job_data_alloc(jobmgr_slurm_t js, uint64_t job_id)
 		goto err_0;
 	pthread_mutex_init(&job->mutex, NULL);
 	job->job_id = job_id;
+
+	/* job structure */
+	rbt_init(&job->step_rbt, u64_node_cmp);
+
 	snprintf(buf, sizeof(buf), "slurm_%lu", job_id);
 	sch = get_job_schema(js->plug);
 	if (!sch)
@@ -486,8 +609,6 @@ static job_data_t __job_data_alloc(jobmgr_slurm_t js, uint64_t job_id)
 	if (!job->set)
 		goto err_1;
 	ldms_set_ref_get(job->set, "jobmgr_slurm:job");
-
-	rbt_init(&job->task_rbt, u64_node_cmp);
 
 	/* setup mvals for conveneint. Use "name" instead of ID just in case the
 	 * metric ordering changed. */
@@ -556,12 +677,17 @@ static job_data_t job_data_get(jobmgr_slurm_t js, uint64_t job_id)
 	return job;
 }
 
-static task_data_t task_data_find(job_data_t job, uint64_t task_pid)
+static task_data_t task_data_find(job_data_t job, uint64_t step_id, uint64_t task_pid)
 {
-	struct rbn *rbn;
+	struct rbn *rbn = NULL;
+	step_data_t step;
+	step = step_data_get(job, step_id);
+	if (!step)
+		goto out;
 	pthread_mutex_lock(&job->mutex);
-	rbn = rbt_find(&job->task_rbt, &task_pid);
+	rbn = rbt_find(&step->task_rbt, &task_pid);
 	pthread_mutex_unlock(&job->mutex);
+ out:
 	if (rbn)
 		return container_of(rbn, struct task_data, rbn);
 	return NULL;
@@ -594,20 +720,29 @@ static void handle_job_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 	job->mv_job_start->v_ts.sec = timestamp;
 	job->mv_job_start->v_ts.usec = 0;
 
+	job->job_start.sec = timestamp;
+	job->job_start.usec = 0;
+
 	/* node count */
 	av = json_value_find(dict, "nnodes");
-	if (av)
+	if (av) {
 		job->mv_node_count->v_u32 = json_value_int(av);
+		job->node_count = json_value_int(av);
+	}
 
 	/* uid */
 	av = json_value_find(dict, "uid");
-	if (av)
+	if (av) {
 		job->mv_job_uid->v_u32 = json_value_int(av);
+		job->job_uid = json_value_int(av);
+	}
 
 	/* gid */
 	av = json_value_find(dict, "gid");
-	if (av)
+	if (av) {
 		job->mv_job_gid->v_u32 = json_value_int(av);
+		job->job_gid = json_value_int(av);
+	}
 
 	/* job_size */
 	av = json_value_find(dict, "total_tasks");
@@ -639,12 +774,46 @@ static void handle_job_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 
 }
 
+static step_data_t step_data_get(job_data_t job, uint64_t step_id)
+{
+	struct rbn *rbn;
+	step_data_t step;
+	pthread_mutex_lock(&job->mutex);
+	rbn = rbt_find(&job->step_rbt, &step_id);
+	if (rbn) {
+		step = container_of(rbn, struct step_data, rbn);
+		goto out;
+	}
+	step = calloc(1, sizeof(*step));
+	if (!step)
+		goto out;
+	step->job = job;
+	step->step_id = step_id;
+	rbt_init(&step->task_rbt, u64_node_cmp);
+	rbn_init(&step->rbn, &step->step_id);
+	rbt_ins(&job->step_rbt, &step->rbn);
+ out:
+	pthread_mutex_unlock(&job->mutex);
+	return step;
+}
+
 static void handle_step_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 {
 	json_entity_t av, dict;
+	uint64_t timestamp;
 	ldmsd_plug_handle_t p = js->plug;
+	uint64_t step_id;
+	step_data_t step;
 
 	LOG_DEBUG(p, "job %ld: Received 'step_init' event\n", job->job_id);
+
+	av = json_value_find(e, "timestamp");
+	if (!av) {
+		LOG_ERROR(p, "job %ld: Missing 'timestamp' attribute "
+				     "in 'init' event.\n", job->job_id);
+		return;
+	}
+	timestamp = json_value_int(av);
 
 	dict = json_value_find(e, "data");
 	if (!dict) {
@@ -655,11 +824,30 @@ static void handle_step_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 
 	ldms_transaction_begin(job->set);
 
+	/* step_id */
+	av = json_value_find(dict, "step_id");
+	if (!av) {
+		LOG_ERROR(p, "job %ld: Missing 'step_id' attribute in "
+				     "'step_init' event.\n", job->job_id);
+		return;
+	}
+	job->mv_job_step_id->v_u64 = json_value_int(av);
+	step_id = json_value_int(av);
+	step = step_data_get(job, step_id);
+	if (!step) {
+		LOG_ERROR(p, "job %ld: step data allocation error.\n", job->job_id);
+		return;
+	}
+	step->step_start.sec = timestamp;
+	step->step_start.usec = 0;
+
 	/* user */
 	av = json_value_find(dict, "job_user");
 	if (av) {
 		if (json_entity_type(av) == JSON_STRING_VALUE) {
 			snprintf(job->mv_user->a_char, LDMSD_JOBSET_USER_LEN,
+				 "%s", json_value_str(av)->str);
+			snprintf(job->user, LDMSD_JOBSET_USER_LEN,
 				 "%s", json_value_str(av)->str);
 		}
 	}
@@ -669,6 +857,8 @@ static void handle_step_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 	if (av) {
 		if (json_entity_type(av) == JSON_STRING_VALUE) {
 			snprintf(job->mv_job_name->a_char, LDMSD_JOBSET_JOB_NAME_LEN,
+				 "%s", json_value_str(av)->str);
+			snprintf(job->job_name, LDMSD_JOBSET_JOB_NAME_LEN,
 				 "%s", json_value_str(av)->str);
 		}
 	}
@@ -684,6 +874,8 @@ static void handle_step_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 					snprintf(job->mv_job_tag->a_char,
 						 JOB_TAG_STR_LEN,
 						"%s", json_value_str(av)->str);
+					snprintf(job->job_tag, JOB_TAG_STR_LEN,
+						"%s", json_value_str(av)->str);
 				}
 			}
 		}
@@ -691,23 +883,25 @@ static void handle_step_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 
 	/* node count */
 	av = json_value_find(dict, "nnodes");
-	if (av)
+	if (av) {
 		job->mv_node_count->v_u32 = json_value_int(av);
-
-	/* step_id */
-	av = json_value_find(dict, "step_id");
-	if (av)
-		job->mv_job_step_id->v_u64 = json_value_int(av);
+		job->node_count = json_value_int(av);
+	}
 
 	/* uid */
 	av = json_value_find(dict, "uid");
-	if (av)
+	if (av) {
 		job->mv_job_uid->v_u32 = json_value_int(av);
+		job->job_uid = json_value_int(av);
+	}
+
 
 	/* gid */
 	av = json_value_find(dict, "gid");
-	if (av)
+	if (av) {
 		job->mv_job_gid->v_u32 = json_value_int(av);
+		job->job_gid = json_value_int(av);
+	}
 
 	/* task count */
 	av = json_value_find(dict, "total_tasks");
@@ -716,6 +910,7 @@ static void handle_step_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 				     "in 'step_init' event.\n", job->job_id);
 	} else {
 		job->mv_total_tasks->v_u32 = json_value_int(av);
+		step->total_tasks = json_value_int(av);
 	}
 
 	/* task count */
@@ -726,6 +921,7 @@ static void handle_step_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 								  job->job_id);
 	} else {
 		job->mv_local_tasks->v_u32 = json_value_int(av);
+		step->local_tasks = json_value_int(av);
 	}
 
 	ldms_transaction_end(job->set);
@@ -750,6 +946,7 @@ static void handle_step_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 	ldms_set_ref_get(job->set, "jobmgr_event");
 	ldmsd_jobmgr_get(js->plug, "jobmgr_event");
 
+	/* TODO FIX ME POST STEP EVENT */
 	int rc = ldmsd_jobmgr_event_post(&ev);
 	if (rc) {
 		ldms_set_ref_put(job->set, "jobmgr_event");
@@ -761,7 +958,7 @@ static void handle_task_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 {
 	ldmsd_plug_handle_t p = js->plug;
 	json_entity_t av, dict;
-	uint64_t ts, task_pid, task_rank, task_id;
+	uint64_t ts, task_pid, task_rank, step_id, task_id;
 	task_data_t task;
 
 	av = json_value_find(e, "timestamp");
@@ -809,9 +1006,19 @@ static void handle_task_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 		return;
 	}
 	task_rank = json_value_int(av);
+	/* step id */
+	av = json_value_find(dict, "step_id");
+	if (!av) {
+		LOG_ERROR(p, "job %ld: task %ld: Missing "
+				     "'step_id' attribute in "
+				     "'task_init_priv' event.\n",
+				     job->job_id, task_pid);
+		return;
+	}
+	step_id = json_value_int(av);
 
 	ldms_transaction_begin(job->set);
-	task = task_data_alloc(js, job, task_pid);
+	task = task_data_alloc(js, job, step_id, task_pid);
 	if (!task) {
 		LOG_CRITICAL(p, "Task memory allocation error.\n");
 		ldms_transaction_end(job->set);
@@ -822,6 +1029,11 @@ static void handle_task_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 	task->mv_task_pid->v_u64 = task_pid;
 	task->mv_task_rank->v_u64 = task_rank;
 	task->mv_step_id->v_u64 = job->mv_job_step_id->v_u64;
+
+	task->task_start.sec = ts;
+	task->task_start.usec = 0;
+	task->task_pid = task_pid;
+	task->task_rank = task_rank;
 
 	/* prepend the step_id to task_id */
 	snprintf(task->mv_task_id->a_char, LDMSD_JOBSET_TASK_ID_LEN,
@@ -850,7 +1062,7 @@ static void handle_task_exit(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 {
 	ldmsd_plug_handle_t p = js->plug;
 	json_entity_t dict, av;
-	uint64_t ts, task_pid;
+	uint64_t ts, step_id, task_pid;
 	task_data_t task;
 
 	av = json_value_find(e, "timestamp");
@@ -878,7 +1090,15 @@ static void handle_task_exit(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 	LOG_DEBUG(p, "job %ld: task %ld: Received 'task_exit' event\n",
 					     job->job_id, task_pid);
 
-	task = task_data_find(job, task_pid);
+	av = json_value_find(dict, "step_id");
+	if (!av) {
+		LOG_ERROR(p, "job %ld: Missing 'step_id' attribute "
+				     "in 'task_exit' event.\n", job->job_id);
+		return;
+	}
+	step_id = json_value_int(av);
+
+	task = task_data_find(job, step_id, task_pid);
 	if (!task) {
 		LOG_ERROR(p, "job %ld: task %ld: Cannot find "
 				     "the task_data in 'task_exit' event.\n", job->job_id, task_pid);
@@ -900,6 +1120,10 @@ static void handle_task_exit(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 	job->exited_tasks_count += 1;
 	ldms_transaction_end(job->set);
 
+	task->task_end.sec  = ts;
+	task->task_end.usec = 0;
+	task->task_exit_status = json_value_int(av);
+
 	struct ldmsd_jobmgr_event ev = {
 		.type        = LDMSD_JOBMGR_TASK_END,
 		.mgr         = js->plug,
@@ -911,6 +1135,63 @@ static void handle_task_exit(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 	ldmsd_jobmgr_get(js->plug, "jobmgr_event");
 
 	int rc = ldmsd_jobmgr_event_post(&ev);
+	if (rc) {
+		ldms_set_ref_put(job->set, "jobmgr_event");
+		ldmsd_jobmgr_put(js->plug, "jobmgr_event");
+	}
+}
+
+static void handle_step_exit(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
+{
+	json_entity_t dict, av;
+	uint64_t step_id;
+	ldmsd_plug_handle_t p = js->plug;
+	int rc;
+	step_data_t step;
+
+	LOG_DEBUG(p, "job %ld: Received 'step_exit' event.\n",
+							 job->job_id);
+
+	dict = json_value_find(e, "data");
+	if (!dict) {
+		LOG_ERROR(p, "job %ld: Missing 'data' attribute in "
+				    "'step_exit' event.\n", job->job_id);
+		return;
+	}
+
+	av = json_value_find(dict, "step_id");
+	if (!av) {
+		LOG_ERROR(p, "job %ld: Missing 'step_id' attribute "
+				     "in 'task_exit' event.\n", job->job_id);
+		return;
+	}
+	step_id = json_value_int(av);
+
+	av = json_value_find(e, "timestamp");
+	if (!av) {
+		LOG_ERROR(p, "job %ld: Missing 'timestamp' "
+				"attribute in 'step_exit' event.\n", job->job_id);
+		return;
+	}
+
+	step = step_data_get(job, step_id);
+	if (!step) {
+		LOG_ERROR(p, "job %ld: step data allocation error.\n", job->job_id);
+		return;
+	}
+
+	step->step_end.sec = json_value_int(av);
+	step->step_end.usec = 0;
+
+	/* TODO correct the event */
+	struct ldmsd_jobmgr_event ev = {
+		.type   = LDMSD_JOBMGR_STEP_END,
+		.mgr    = js->plug,
+		.jobset = job->set,
+	};
+	ldms_set_ref_get(job->set, "jobmgr_event");
+	ldmsd_jobmgr_get(js->plug, "jobmgr_event");
+	rc = ldmsd_jobmgr_event_post(&ev);
 	if (rc) {
 		ldms_set_ref_put(job->set, "jobmgr_event");
 		ldmsd_jobmgr_put(js->plug, "jobmgr_event");
@@ -937,6 +1218,9 @@ static void handle_job_exit(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 	job->mv_job_end->v_ts.usec = 0;
 	ldms_transaction_end(job->set);
 
+	job->job_end.sec = json_value_int(av);
+	job->job_end.usec = 0;
+
 	struct ldmsd_jobmgr_event ev = {
 		.type   = LDMSD_JOBMGR_JOB_END,
 		.mgr    = js->plug,
@@ -950,9 +1234,9 @@ static void handle_job_exit(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 		ldmsd_jobmgr_put(js->plug, "jobmgr_event");
 	}
 
+	/* TODO Delay free it! */
 	job_data_free(js, job);
 }
-
 
 static void handle_msg_recv(ldmsd_plug_handle_t p, jobmgr_slurm_t js, ldms_msg_event_t ev)
 {
@@ -1021,6 +1305,15 @@ static void handle_msg_recv(ldmsd_plug_handle_t p, jobmgr_slurm_t js, ldms_msg_e
 			goto err_0;
 		}
 		handle_task_exit(js, job, ev->recv.json);
+	} else if (0 == strncmp(event_name->str, "step_exit", 4)) {
+		job = job_data_get(js, job_id);
+		if (!job) {
+			LOG_ERROR(p, "'%s' event was received "
+					"for job %ld with no job_data.\n",
+					event_name->str, job_id);
+			goto err_0;
+		}
+		handle_step_exit(js, job, ev->recv.json);
 	} else if (0 == strncmp(event_name->str, "exit", 4)) {
 		job = job_data_get(js, job_id);
 		if (!job) {
@@ -1135,6 +1428,243 @@ static int stop(ldmsd_plug_handle_t p)
 	return 0;
 }
 
+struct query_ctxt {
+	int n;
+	const struct ldmsd_jobmgr_query_s *q; /* for convenient */
+	int level; /* 0 for job, 1 for step, 2 for task */
+	const struct jobmgr_slurm_mdesc_s *mdesc[OVIS_FLEX];
+};
+
+static int on_query_new(ldmsd_plug_handle_t p,
+			const struct ldmsd_jobmgr_query_s *q,
+			void **q_ctxt_out)
+{
+	int i;
+	int mx = 0;
+	struct query_ctxt *ctxt;
+	ctxt = calloc(1, sizeof(*ctxt) + q->n_metrics*sizeof(q->mdesc[0]));
+	if (!ctxt)
+		return ENOMEM;
+	ctxt->n = q->n_metrics;
+	ctxt->q = q;
+	for (i = 0; i < q->n_metrics; i++) {
+		ctxt->mdesc[i] = jobmgr_slurm_mdesc_find(q->mdesc[i].name);
+		/* it is OK if we may not have all of the metrics */
+		if (!ctxt->mdesc[i])
+			continue;
+		if (ctxt->mdesc[i]->m_type > mx)
+			mx = ctxt->mdesc[i]->m_type;
+	}
+	if (mx >= 0x200) {
+		ctxt->level = 2;
+	} else if (mx >= 0x100) {
+		ctxt->level = 1;
+	} else {
+		ctxt->level = 0;
+	}
+	*q_ctxt_out = ctxt;
+	return 0;
+}
+
+static void on_query_free(ldmsd_plug_handle_t p,
+			const struct ldmsd_jobmgr_query_s *q, void *q_ctxt)
+{
+	struct query_ctxt *ctxt = q_ctxt;
+	free(ctxt);
+}
+
+void mv_assign(const struct jobmgr_slurm_mdesc_s *mdesc,
+	       ldms_mval_t mv, job_data_t job, step_data_t step, task_data_t task)
+{
+	switch (mdesc->m_type) {
+	case JOBMGR_SLURM_METRIC_JOB_ID:
+		snprintf(mv->a_char, LDMSD_JOBMGR_JOB_ID_LEN,
+			 "slurm_%lu", job->job_id);
+		break;
+	case JOBMGR_SLURM_METRIC_USER:
+		snprintf(mv->a_char, LDMSD_JOBMGR_USER_LEN,
+			 "%s", job->user);
+		break;
+	case JOBMGR_SLURM_METRIC_JOB_NAME:
+		snprintf(mv->a_char, LDMSD_JOBMGR_JOB_NAME_LEN,
+			 "%s", job->job_name);
+		break;
+	case JOBMGR_SLURM_METRIC_JOB_UID:
+		mv->v_u32 = job->job_uid;
+		break;
+	case JOBMGR_SLURM_METRIC_JOB_GID:
+		mv->v_u32 = job->job_gid;
+		break;
+	case JOBMGR_SLURM_METRIC_JOB_START:
+		mv->v_ts = job->job_start;
+		break;
+	case JOBMGR_SLURM_METRIC_JOB_END:
+		mv->v_ts = job->job_end;
+		break;
+	case JOBMGR_SLURM_METRIC_NODE_COUNT:
+		mv->v_u32 = job->node_count;
+		break;
+	case JOBMGR_SLURM_METRIC_JOB_TAG:
+		snprintf(mv->a_char, JOB_TAG_STR_LEN, "%s", job->job_tag);
+		break;
+
+	case JOBMGR_SLURM_METRIC_STEP_ID:
+		if (step)
+			snprintf(mv->a_char, LDMSD_JOBMGR_STEP_ID_LEN,
+				 "slurm_%lu.%lu", job->job_id, step->step_id);
+		break;
+	case JOBMGR_SLURM_METRIC_STEP_START:
+		if (step)
+			mv->v_ts = step->step_start;
+		break;
+	case JOBMGR_SLURM_METRIC_STEP_END:
+		if (step)
+			mv->v_ts = step->step_end;
+		break;
+	case JOBMGR_SLURM_METRIC_TOTAL_TASKS:
+		if (step)
+			mv->v_u32 = step->total_tasks;
+		break;
+	case JOBMGR_SLURM_METRIC_LOCAL_TASKS:
+		if (step)
+			mv->v_u32 = step->local_tasks;
+		break;
+
+	case JOBMGR_SLURM_METRIC_TASK_ID:
+		if (step && task)
+			snprintf(mv->a_char, LDMSD_JOBMGR_TASK_ID_LEN,
+				 "slurm_%lu.%lu.%lu",
+				 job->job_id, step->step_id, task->task_id);
+		break;
+	case JOBMGR_SLURM_METRIC_TASK_PID:
+		if (task)
+			mv->v_u64 = task->task_pid;
+		break;
+	case JOBMGR_SLURM_METRIC_TASK_RANK:
+		if (task)
+			mv->v_u32 = task->task_rank;
+		break;
+	case JOBMGR_SLURM_METRIC_TASK_START:
+		if (task)
+			mv->v_ts = task->task_start;
+		break;
+	case JOBMGR_SLURM_METRIC_TASK_END:
+		if (task)
+			mv->v_ts = task->task_end;
+		break;
+	case JOBMGR_SLURM_METRIC_TASK_EXIT_STATUS:
+		if (task)
+			mv->v_s32 = task->task_exit_status;
+		break;
+	}
+}
+
+int make_qres(struct query_ctxt *ctxt,
+			      ldmsd_jobmgr_qres_list_t list,
+			      job_data_t job,
+			      step_data_t step,
+			      task_data_t task)
+{
+	int i;
+	ldms_mval_t mv;
+	ldmsd_jobmgr_qres_t qres;
+
+	qres = calloc(1, sizeof(*qres) + ctxt->q->qres_size);
+	if (!qres)
+		return ENOMEM;
+	for (i = 0; i < ctxt->n; i++) {
+		if (!ctxt->mdesc[i])
+			continue; /* we don't have this metric */
+		mv = ldmsd_jobmgr_qres_mval(ctxt->q, qres, i);
+		mv_assign(ctxt->mdesc[i], mv, job, step, task);
+	}
+	TAILQ_INSERT_TAIL(&list->tailq, qres, entry);
+	return 0;
+}
+
+static int task_ls(step_data_t step, struct query_ctxt *ctxt,
+		  ldmsd_jobmgr_qres_list_t list)
+{
+	struct rbn *rbn;
+	task_data_t task;
+
+	rbn = rbt_min(&step->task_rbt);
+	task = rbn?container_of(rbn, struct task_data, rbn):NULL;
+	if (!task) {
+		make_qres(ctxt, list, step->job, step, NULL);
+	}
+	while (task) {
+		make_qres(ctxt, list, step->job, step, task);
+		rbn = rbn_succ(rbn);
+		task = rbn?container_of(rbn, struct task_data, rbn):NULL;
+	}
+	return 0;
+}
+
+static int step_ls(job_data_t job, struct query_ctxt *ctxt,
+		  ldmsd_jobmgr_qres_list_t list)
+{
+	struct rbn *rbn;
+	step_data_t step;
+
+	rbn = rbt_min(&job->step_rbt);
+	step = rbn?container_of(rbn, struct step_data, rbn):NULL;
+	if (!step) {
+		make_qres(ctxt, list, job, NULL, NULL);
+	}
+	while (step) {
+		if (ctxt->level == 1) {
+			make_qres(ctxt, list, job, step, NULL);
+			goto next;
+		}
+		/* otherwise, traverse the tasks */
+		task_ls(step, ctxt, list);
+	next:
+		rbn = rbn_succ(rbn);
+		step = rbn?container_of(rbn, struct step_data, rbn):NULL;
+	}
+	return 0;
+}
+
+static int job_ls(jobmgr_slurm_t js, struct query_ctxt *ctxt,
+		  ldmsd_jobmgr_qres_list_t list)
+{
+	struct rbn *rbn;
+	job_data_t job;
+	pthread_mutex_lock(&js->mutex);
+	rbn = rbt_min(&js->job_tree);
+	job = rbn?container_of(rbn, struct job_data, rbn):NULL;
+	while (job) {
+		if (ctxt->level == 0) {
+			make_qres(ctxt, list, job, NULL, NULL);
+			goto next;
+		}
+		/* otherwise, traverse the steps */
+		pthread_mutex_lock(&job->mutex);
+		step_ls(job, ctxt, list);
+		pthread_mutex_unlock(&job->mutex);
+	next:
+		rbn = rbn_succ(rbn);
+		job = rbn?container_of(rbn, struct job_data, rbn):NULL;
+	}
+	pthread_mutex_unlock(&js->mutex);
+	return 0;
+}
+
+static ldmsd_jobmgr_qres_list_t on_query_ls(ldmsd_plug_handle_t p,
+			const struct ldmsd_jobmgr_query_s *q, void *q_ctxt)
+{
+	jobmgr_slurm_t js = ldmsd_plug_ctxt_get(p);
+	struct query_ctxt *ctxt = q_ctxt;
+	ldmsd_jobmgr_qres_list_t list;
+	list = calloc(1, sizeof(*list));
+	if (!list)
+		return NULL;
+	TAILQ_INIT(&list->tailq);
+	job_ls(js, ctxt, list);
+	return list;
+}
+
 struct ldmsd_jobmgr ldmsd_plugin_interface = {
 	.base = {
 		.type = LDMSD_PLUGIN_JOBMGR,
@@ -1146,4 +1676,24 @@ struct ldmsd_jobmgr ldmsd_plugin_interface = {
 	},
 	.start = start,
 	.stop  = stop,
+	.on_query_new = on_query_new,
+	.on_query_free = on_query_free,
+	.on_query_ls = on_query_ls,
 };
+
+static int __mdesc_cmp(const void *_a, const void *_b)
+{
+	const struct jobmgr_slurm_mdesc_s *a = _a;
+	const struct jobmgr_slurm_mdesc_s *b = _b;
+	return strcmp(a->name, b->name);
+}
+
+__attribute__((constructor))
+static void __init__()
+{
+	/* library init */
+	qsort(jobmgr_slurm_mdesc_tbl,
+	      sizeof(jobmgr_slurm_mdesc_tbl)/sizeof(jobmgr_slurm_mdesc_tbl[0]),
+	      sizeof(jobmgr_slurm_mdesc_tbl[0]),
+	      __mdesc_cmp);
+}

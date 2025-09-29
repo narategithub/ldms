@@ -629,7 +629,7 @@ ldmsd_jobmgr_query_t ldmsd_jobmgr_query_new(int n, const char *metrics[])
 		goto err;
 	}
 
-	sz = sizeof(*q) + card*sizeof(q->mdesc[0])
+	sz = sizeof(*q) + n*sizeof(q->mdesc[0])
 			+ card*sizeof(q->jobmgrs[0])
 			+ card*sizeof(q->jobmgrs_ctxt[0]) ;
 
@@ -740,9 +740,50 @@ void ldmsd_jobmgr_qres_list_free(ldmsd_jobmgr_qres_list_t l)
 	free(l);
 }
 
+struct ldms_metric_template_s jobmgr_common_metrics[] = {
+	{ "job_id",       LDMS_MDESC_F_META, LDMS_V_CHAR_ARRAY, NULL,
+			  LDMSD_JOBMGR_JOB_ID_LEN, NULL },
+
+	{ "user",         LDMS_MDESC_F_META, LDMS_V_CHAR_ARRAY, NULL,
+			  LDMSD_JOBMGR_USER_LEN, NULL },
+
+	{ "job_name",     LDMS_MDESC_F_META, LDMS_V_CHAR_ARRAY, NULL,
+			  LDMSD_JOBMGR_JOB_NAME_LEN, NULL },
+
+	{ "job_uid",      LDMS_MDESC_F_META, LDMS_V_U32,        NULL, 1,   NULL },
+	{ "job_gid",      LDMS_MDESC_F_META, LDMS_V_U32,        NULL, 1,   NULL },
+	{ "job_start",    LDMS_MDESC_F_DATA, LDMS_V_TIMESTAMP,  NULL, 1,   NULL },
+	{ "job_end",      LDMS_MDESC_F_DATA, LDMS_V_TIMESTAMP,  NULL, 1,   NULL },
+	{ "node_count",   LDMS_MDESC_F_DATA, LDMS_V_U32,        NULL, 1,   NULL },
+	{ "total_tasks",  LDMS_MDESC_F_DATA, LDMS_V_U32,        NULL, 1,   NULL },
+	{ "local_tasks",  LDMS_MDESC_F_DATA, LDMS_V_U32,        NULL, 1,   NULL },
+
+	{ "step_id",          LDMS_MDESC_F_DATA, LDMS_V_CHAR_ARRAY, NULL,
+			      LDMSD_JOBMGR_STEP_ID_LEN, NULL },
+	{ "step_start",       LDMS_MDESC_F_DATA, LDMS_V_TIMESTAMP, NULL, 1, NULL },
+	{ "step_end",         LDMS_MDESC_F_DATA, LDMS_V_TIMESTAMP, NULL, 1, NULL },
+
+	{ "task_id",          LDMS_MDESC_F_DATA, LDMS_V_CHAR_ARRAY, NULL,
+			      LDMSD_JOBMGR_TASK_ID_LEN, NULL },
+
+	{ "task_pid",         LDMS_MDESC_F_DATA, LDMS_V_U64,        NULL, 1,   NULL },
+	{ "task_rank",        LDMS_MDESC_F_DATA, LDMS_V_U32,        NULL, 1,   NULL },
+	{ "task_start",       LDMS_MDESC_F_DATA, LDMS_V_TIMESTAMP,  NULL, 1,   NULL },
+	{ "task_end",         LDMS_MDESC_F_DATA, LDMS_V_TIMESTAMP,  NULL, 1,   NULL },
+	{ "task_exit_status", LDMS_MDESC_F_DATA, LDMS_V_S32,        NULL, 1,   NULL },
+
+	{0} /* terminator */
+};
+
 __attribute__((constructor))
 static void jobmgr_once()
 {
+	/* register common metrics */
+	struct ldms_metric_template_s *tmp;
+	for (tmp = &jobmgr_common_metrics[0]; tmp->name; tmp++) {
+		ldmsd_jobmgr_metric_register(tmp);
+	}
+
 	jobmgr_sched = ovis_scheduler_new();
 	pthread_create(&jobmgr_thr, NULL, jobmgr_sched_proc, NULL);
 	pthread_setname_np(jobmgr_thr, "jobmgr");

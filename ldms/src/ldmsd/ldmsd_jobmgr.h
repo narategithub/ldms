@@ -127,7 +127,7 @@ typedef struct ldmsd_jobmgr_qres_s {
 } *ldmsd_jobmgr_qres_t;
 
 static inline ldms_mval_t
-ldmsd_jobmgr_qres_mval(ldmsd_jobmgr_query_t q,
+ldmsd_jobmgr_qres_mval(const struct ldmsd_jobmgr_query_s *q,
 			    ldmsd_jobmgr_qres_t r,
 			    int idx)
 {
@@ -218,6 +218,12 @@ typedef struct ldmsd_cfgobj_jobmgr *ldmsd_cfgobj_jobmgr_t;
 #define LDMSD_JOBSET_USER_LEN     32
 #define LDMSD_JOBSET_JOB_NAME_LEN 256
 #define LDMSD_JOBSET_TASK_ID_LEN  256
+
+#define LDMSD_JOBMGR_JOB_ID_LEN 256
+#define LDMSD_JOBMGR_STEP_ID_LEN 256
+#define LDMSD_JOBMGR_TASK_ID_LEN 256
+#define LDMSD_JOBMGR_JOB_NAME_LEN 256
+#define LDMSD_JOBMGR_USER_LEN     32
 
 typedef enum ldmsd_jobset_metric_id_e {
 	/* maintain the same order with common_jobset_metrics[] */
@@ -325,9 +331,11 @@ void ldmsd_jobset_delete(ldms_set_t jobset);
 
 enum ldmsd_jobmgr_event_type {
 	LDMSD_JOBMGR_JOB_START,
+	LDMSD_JOBMGR_JOB_END,
+	LDMSD_JOBMGR_STEP_START,
+	LDMSD_JOBMGR_STEP_END,
 	LDMSD_JOBMGR_TASK_START,
 	LDMSD_JOBMGR_TASK_END,
-	LDMSD_JOBMGR_JOB_END,
 	LDMSD_JOBMGR_SET_DELETE, /* the jobset is going away ... stop using it */
 	LDMSD_JOBMGR_CLIENT_CLOSE, /* the last event delivered to the cb fn */
 };

@@ -58,6 +58,7 @@ typedef struct test_jobmgr_samp_s {
 	struct ref_s ref;
 	ldmsd_jobmgr_event_client_t c;
 	FILE *f;
+	ldmsd_jobmgr_query_t q;
 } *test_jobmgr_samp_t;
 
 const char *_usage = "\
@@ -165,6 +166,12 @@ void jobmgr_cb(ldmsd_jobmgr_event_client_t c,
 		fprintf(j->f, "client_close\n");
 		ref_put(&j->ref, "jobmgr_cb");
 		break;
+	case LDMSD_JOBMGR_STEP_START:
+		fprintf(j->f, "step_start: %s\n", jobset_buf);
+		break;
+	case LDMSD_JOBMGR_STEP_END:
+		fprintf(j->f, "step_end: %s\n", jobset_buf);
+		break;
 	}
 }
 
@@ -190,6 +197,7 @@ static int config(ldmsd_plug_handle_t handle,
 		goto err;
 	}
 	setbuf(j->f, NULL);
+	/*
 	ref_get(&j->ref, "jobmgr_cb");
 	j->c = ldmsd_jobmgr_event_subscribe(jobmgr_cb, j);
 	if (!j->c) {
@@ -197,6 +205,13 @@ static int config(ldmsd_plug_handle_t handle,
 		LOG_ERROR(handle, "jobmgr subscribe error: %d\n", errno);
 		goto err;
 	}
+	*/
+	const char *metrics[] = {
+		"job_id", "step_id", "task_id", "task_pid",
+		"job_start", "job_end", "step_start", "step_end",
+		"task_start", "task_end"
+	};
+	j->q = ldmsd_jobmgr_query_new(sizeof(metrics)/sizeof(metrics[0]), metrics);
 	return 0;
 
  err:
@@ -237,7 +252,60 @@ static void destructor(ldmsd_plug_handle_t handle)
 
 static int sample(ldmsd_plug_handle_t handle)
 {
-	/* no-op */
+	int i;
+	test_jobmgr_samp_t j = ldmsd_plug_ctxt_get(handle);
+	ldmsd_jobmgr_qres_list_t list;
+	ldmsd_jobmgr_qres_t qres;
+	ldms_mval_t mv;
+	const char *sep = "";
+	list = ldmsd_jobmgr_query_ls(j->q);
+	if (!list)
+		goto out;
+	fprintf(j->f, "[\n");
+	TAILQ_FOREACH(qres, &list->tailq, entry) {
+		fprintf(j->f, " %s{\n", sep);
+		for (i = 0; i < j->q->n_metrics; i++) {
+			fprintf(j->f, "  %s\"%s\": ", i?",":"", j->q->mdesc[i].name);
+			mv = ldmsd_jobmgr_qres_mval(j->q, qres, i);
+			switch (j->q->mdesc[i].type) {
+			case LDMS_V_S8:
+				fprintf(j->f, "%hhd\n", mv->v_s8);
+				break;
+			case LDMS_V_U8:
+				fprintf(j->f, "%hhu\n", mv->v_s8);
+				break;
+			case LDMS_V_S16:
+				fprintf(j->f, "%hd\n", mv->v_s16);
+				break;
+			case LDMS_V_U16:
+				fprintf(j->f, "%hu\n", mv->v_s16);
+				break;
+			case LDMS_V_S32:
+				fprintf(j->f, "%d\n", mv->v_s32);
+				break;
+			case LDMS_V_U32:
+				fprintf(j->f, "%u\n", mv->v_s32);
+				break;
+			case LDMS_V_S64:
+				fprintf(j->f, "%ld\n", mv->v_s64);
+				break;
+			case LDMS_V_U64:
+				fprintf(j->f, "%lu\n", mv->v_s64);
+				break;
+			case LDMS_V_CHAR_ARRAY:
+				fprintf(j->f, "%s\n", mv->a_char);
+				break;
+			case LDMS_V_TIMESTAMP:
+				fprintf(j->f, "%d.%06d\n", mv->v_ts.sec, mv->v_ts.usec);
+				break;
+			default:
+				break;
+			}
+		}
+		sep = ",";
+	}
+	fprintf(j->f, "]\n");
+ out:
 	return 0;
 }
 
