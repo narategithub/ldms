@@ -500,6 +500,246 @@ void *jobmgr_sched_proc(void *arg)
 	return NULL;
 }
 
+int jobmgr_mtmp_cmp(void *tk, const void *k)
+{
+	return strcmp(tk, k);
+}
+
+pthread_mutex_t jobmgr_mtmp_rbt_mutex = PTHREAD_MUTEX_INITIALIZER;
+struct rbt jobmgr_mtmp_rbt = RBT_INITIALIZER(jobmgr_mtmp_cmp);
+
+#define JOBMGR_MTMP_RBT_LOCK() pthread_mutex_lock(&jobmgr_mtmp_rbt_mutex)
+#define JOBMGR_MTMP_RBT_UNLOCK() pthread_mutex_unlock(&jobmgr_mtmp_rbt_mutex)
+
+struct jobmgr_mtmp_s {
+	struct rbn rbn;
+	struct ldms_metric_template_s tmp;
+};
+
+int ldmsd_jobmgr_metric_register(struct ldms_metric_template_s *m)
+{
+	struct rbn *rbn;
+	struct jobmgr_mtmp_s *mtmp;
+	size_t sz, name_len, unit_len;
+
+	/* only support pritives, array of primitives and timestamp */
+	switch (m->type) {
+	case LDMS_V_CHAR: case LDMS_V_U8:  case LDMS_V_S8:
+	case LDMS_V_U16:  case LDMS_V_S16: case LDMS_V_U32: case LDMS_V_S32:
+	case LDMS_V_U64:  case LDMS_V_S64: case LDMS_V_F32: case LDMS_V_D64:
+	case LDMS_V_CHAR_ARRAY:
+	case LDMS_V_U8_ARRAY:  case LDMS_V_S8_ARRAY:
+	case LDMS_V_U16_ARRAY: case LDMS_V_S16_ARRAY:
+	case LDMS_V_U32_ARRAY: case LDMS_V_S32_ARRAY:
+	case LDMS_V_U64_ARRAY: case LDMS_V_S64_ARRAY:
+	case LDMS_V_F32_ARRAY: case LDMS_V_D64_ARRAY:
+	case LDMS_V_TIMESTAMP:
+		break;
+	default:
+		return EINVAL;
+	}
+
+	JOBMGR_MTMP_RBT_LOCK();
+
+	rbn = rbt_find(&jobmgr_mtmp_rbt, m->name);
+
+	if (!rbn)
+		goto create;
+
+	/* check if they're compatible */
+	mtmp = container_of(rbn, struct jobmgr_mtmp_s, rbn);
+	if (m->type != mtmp->tmp.type)
+		goto eexist;
+	if (m->len != mtmp->tmp.len)
+		goto eexist;
+	if (strcmp(m->unit, mtmp->tmp.unit))
+		goto eexist;
+	/* compatible, return 0 */
+	goto out;
+
+ create:
+	name_len = strlen(m->name) + 1;
+	unit_len = (m->unit)?(strlen(m->unit)+1):0;
+	sz = sizeof(*mtmp) + name_len + unit_len;
+	mtmp = calloc(1, sz);
+	if (!mtmp)
+		goto enomem;
+	mtmp->tmp.type = m->type;
+	mtmp->tmp.len = m->len;
+	mtmp->tmp.name = (char*)&mtmp[1];
+	memcpy((void*)mtmp->tmp.name, m->name, name_len);
+	if (unit_len) {
+		mtmp->tmp.unit = mtmp->tmp.name + name_len;
+		memcpy((void*)mtmp->tmp.unit, m->unit, unit_len);
+	}
+
+	rbn_init(&mtmp->rbn, (void*)mtmp->tmp.name);
+	rbt_ins(&jobmgr_mtmp_rbt, &mtmp->rbn);
+
+ out:
+	JOBMGR_MTMP_RBT_UNLOCK();
+	return 0;
+
+ eexist:
+	JOBMGR_MTMP_RBT_UNLOCK();
+	return EEXIST;
+
+ enomem:
+	JOBMGR_MTMP_RBT_UNLOCK();
+	return ENOMEM;
+}
+
+const struct ldms_metric_template_s *
+ldmsd_jobmgr_metric_lookup(const char *name)
+{
+	struct rbn *rbn;
+	struct jobmgr_mtmp_s *mtmp;
+	struct ldms_metric_template_s *tmp;
+	JOBMGR_MTMP_RBT_LOCK();
+	rbn = rbt_find(&jobmgr_mtmp_rbt, name);
+	if (!rbn) {
+		errno = ENOENT;
+		tmp = NULL;
+	} else {
+		mtmp = container_of(rbn, struct jobmgr_mtmp_s, rbn);
+		tmp = &mtmp->tmp;
+	}
+	JOBMGR_MTMP_RBT_UNLOCK();
+	return tmp;
+}
+
+extern struct rbt *cfgobj_trees[]; /* defined in ldmsd_cfgobj.c */
+
+ldmsd_jobmgr_query_t ldmsd_jobmgr_query_new(int n, const char *metrics[])
+{
+	ldmsd_cfgobj_t obj;
+	ldmsd_cfgobj_jobmgr_t mgr;
+	ldmsd_jobmgr_query_t q;
+	const struct ldms_metric_template_s *tmp;
+	int i, card;
+	size_t sz;
+	off_t off;
+	int rc;
+
+	ldmsd_cfg_lock(LDMSD_CFGOBJ_JOBMGR);
+	/* get card */
+	card = cfgobj_trees[LDMSD_CFGOBJ_JOBMGR]->card;
+	if (!card) {
+		errno = ENOENT;
+		goto err;
+	}
+
+	sz = sizeof(*q) + card*sizeof(q->mdesc[0])
+			+ card*sizeof(q->jobmgrs[0])
+			+ card*sizeof(q->jobmgrs_ctxt[0]) ;
+
+	q = calloc(1, sz);
+	if (!q)
+		goto err;
+	q->mdesc = (void*)&q[1];
+	q->jobmgrs = (void*)&q->mdesc[n];
+	q->jobmgrs_ctxt = (void*)&q->jobmgrs[card];
+
+	/* build mdesc */
+	off = 0;
+	for (i = 0; i < n; i++) {
+		tmp = ldmsd_jobmgr_metric_lookup(metrics[i]);
+		if (!tmp) {
+			errno = ENOENT;
+			goto err_1;
+		}
+		q->mdesc[i].off = off;
+		q->mdesc[i].len = tmp->len;
+		q->mdesc[i].type = tmp->type;
+		q->mdesc[i].name = tmp->name;
+		q->mdesc[i].unit = tmp->unit;
+		off += ldms_metric_value_size_get(tmp->type, tmp->len);
+	}
+	q->qres_size = off;
+	q->n_metrics = n;
+
+	/* jobmgr business */
+	q->n_jobmgrs = card;
+
+	obj = ldmsd_cfgobj_first(LDMSD_CFGOBJ_JOBMGR);
+	i = 0;
+
+	while (obj) {
+		mgr = container_of(obj, struct ldmsd_cfgobj_jobmgr, cfg);
+		/* BACK HERE success/failed? maybe change the API */
+		rc = mgr->api->on_query_new(obj, q, &q->jobmgrs_ctxt[i]);
+		if (rc) {
+			errno = rc;
+			goto err_2;
+		}
+		q->jobmgrs[i] = mgr;
+		ldmsd_cfgobj_get(obj, "jobmgr_query");
+		obj = ldmsd_cfgobj_next(obj);
+	}
+	ldmsd_cfg_unlock(LDMSD_CFGOBJ_JOBMGR);
+	return q;
+ err_2:
+	for (i = 0; i < q->n_jobmgrs; i++) {
+		if (!q->jobmgrs[i])
+			continue;
+		obj = &q->jobmgrs[i]->cfg;
+		q->jobmgrs[i]->api->on_query_free(obj, q, q->jobmgrs_ctxt[i]);
+		ldmsd_cfgobj_put(obj, "jobmgr_query");
+	}
+
+ err_1:
+	free(q);
+ err:
+	ldmsd_cfg_unlock(LDMSD_CFGOBJ_JOBMGR);
+	return NULL;
+}
+
+void ldmsd_jobmgr_query_free(ldmsd_jobmgr_query_t q)
+{
+	int i;
+	ldmsd_cfgobj_t obj;
+	for (i = 0; i < q->n_jobmgrs; i++) {
+		if (!q->jobmgrs[i])
+			continue;
+		obj = &q->jobmgrs[i]->cfg;
+		q->jobmgrs[i]->api->on_query_free(obj, q, q->jobmgrs_ctxt[i]);
+		ldmsd_cfgobj_put(obj, "jobmgr_query");
+	}
+	free(q);
+}
+
+ldmsd_jobmgr_qres_list_t ldmsd_jobmgr_query_ls(ldmsd_jobmgr_query_t q)
+{
+	ldmsd_jobmgr_qres_list_t lst, _lst;
+	int i;
+	lst = NULL;
+	for (i = 0; i < q->n_jobmgrs; i++) {
+		_lst = q->jobmgrs[i]->api->on_query_ls(
+				&q->jobmgrs[i]->cfg,
+				q,
+				q->jobmgrs_ctxt[i]);
+		if (!_lst)
+			continue;
+		if (lst) {
+			TAILQ_CONCAT(&lst->tailq, &_lst->tailq, entry);
+			free(_lst);
+		} else {
+			lst = _lst;
+		}
+	}
+	return lst;
+}
+
+void ldmsd_jobmgr_qres_list_free(ldmsd_jobmgr_qres_list_t l)
+{
+	ldmsd_jobmgr_qres_t qres;
+	while ((qres = TAILQ_FIRST(&l->tailq))) {
+		TAILQ_REMOVE(&l->tailq, qres, entry);
+		free(qres);
+	}
+	free(l);
+}
+
 __attribute__((constructor))
 static void jobmgr_once()
 {

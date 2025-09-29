@@ -55,17 +55,145 @@
 #define __LDMSD_JOBMGR_H__
 #include "ldmsd.h"
 
+/**
+ * \brief Register a metric.
+ *
+ * The `m->flags` and `m->rec_def` are ignored.
+ *
+ * \retval 0 Success.
+ * \retval EEXIST The metric existed and has different information (e.g.
+ *                different type).
+ * \retval EINVAL Invalid metric template (e.g. trying to add an invalid type).
+ */
+int ldmsd_jobmgr_metric_register(struct ldms_metric_template_s *m);
+
+/**
+ * \brief Lookup a job-related metric by \c name.
+ *
+ * \note The caller must NOT free the returned template.
+ *
+ * \retval tmp The metric template (can be used in schema_add).
+ *             The caller must NOT free the template.
+ * \retval NULL If there is an error (e.g. \c ENOENT if metric not found).
+ */
+const struct ldms_metric_template_s *ldmsd_jobmgr_metric_lookup(const char *name);
+
+struct ldmsd_jobmgr_query_metric_desc_s {
+	/* describe metrics in the query results */
+	const char *name;
+	enum ldms_value_type type;
+	const char *unit;
+	uint32_t len; /* array_len for ARRAY type; otherwise 1 */
+	off_t off; /* offset from the beginning of the result data */
+};
+
+typedef
+struct ldmsd_jobmgr_query_s {
+	size_t qres_size; /* size of each query result in bytes */
+	int n_metrics; /* number of metrics in each result */
+	struct ldmsd_jobmgr_query_metric_desc_s *mdesc; /* array of descriptors */
+
+	int n_jobmgrs; /* number of jobmgr plugins related to this query */
+	struct ldmsd_cfgobj_jobmgr **jobmgrs; /* array of plugins */
+	void **jobmgrs_ctxt; /* array of context for each plugin */
+
+} *ldmsd_jobmgr_query_t;
+
+/**
+ * \brief Create a query handle.
+ *
+ * The returned query handle \c q can be used repeatedly in
+ * \c ldmsd_jobmgr_query_ls()
+ *
+ * \retval q The query handle.
+ * \retval NULL If there is an error, \c errno will describe the error.
+ */
+ldmsd_jobmgr_query_t ldmsd_jobmgr_query_new(int n, const char *metrics[]);
+
+/**
+ * \brief Free the query handle.
+ */
+void ldmsd_jobmgr_query_free(ldmsd_jobmgr_query_t q);
+
+/**
+ * Individual query result.
+ */
+typedef struct ldmsd_jobmgr_qres_s {
+	TAILQ_ENTRY(ldmsd_jobmgr_qres_s) entry;
+	char data[];
+	/* data format: mval0 mval1 mval2 ... according to `metrics` given
+	 * to `ldmsd_jobmgr_query_new()`
+	 */
+} *ldmsd_jobmgr_qres_t;
+
+static inline ldms_mval_t
+ldmsd_jobmgr_qres_mval(ldmsd_jobmgr_query_t q,
+			    ldmsd_jobmgr_qres_t r,
+			    int idx)
+{
+	if (idx < 0 || idx >= q->n_metrics) {
+		errno = EINVAL;
+		return NULL;
+	}
+	return (ldms_mval_t) &r->data[q->mdesc[idx].off];
+}
+
+/**
+ * List of query result.
+ */
+typedef struct ldmsd_jobmgr_qres_list_s {
+	int len;
+	TAILQ_HEAD(, ldmsd_jobmgr_qres_s) tailq;
+} *ldmsd_jobmgr_qres_list_t;
+
+/**
+ * \brief List current job information according to query \c q.
+ *
+ * The returned list must be freed with \c ldmsd_jobmgr_qres_list_free().
+ *
+ * \retval NULL If there is an error, \c errno also set to describe the error.
+ * \retval list The pointer to the list of query results.
+ */
+ldmsd_jobmgr_qres_list_t ldmsd_jobmgr_query_ls(ldmsd_jobmgr_query_t q);
+
+void ldmsd_jobmgr_qres_list_free(ldmsd_jobmgr_qres_list_t l);
+
+
 /* jobmgr API */
 struct ldmsd_jobmgr {
 	struct ldmsd_plugin base;
 
 	/* Called by `ldmsd` to start the plugin.
 	 * The plugin can then start manipulating \c jobset. */
-	int (*start)(ldmsd_plug_handle_t handle);
+	int (*start)(ldmsd_plug_handle_t p);
 
 	/* Called by `ldmsd` to stop the plugin.
 	 * The plugin shall not manipulate \c jobset after this function is called. */
-	int (*stop)(ldmsd_plug_handle_t handle);
+	int (*stop)(ldmsd_plug_handle_t p);
+
+	/*
+	 * The plugin is expected to return its context for the query \c q.
+	 * The returned context is supplied to the plugin in
+	 * \c on_query_ls() and \c on_query_free() calls.
+	 */
+	int (*on_query_new)(ldmsd_plug_handle_t p,
+			const struct ldmsd_jobmgr_query_s *q,
+			void **q_ctxt_out);
+
+	/*
+	 * The plugin is expected to clean up the \c q_ctxt it returned from
+	 * \c on_query_new().
+	 */
+	void (*on_query_free)(ldmsd_plug_handle_t p,
+			const struct ldmsd_jobmgr_query_s *q, void *q_ctxt);
+
+	/*
+	 * The plugin shall return a list of query result (qres) according
+	 * to the query \c q. The \c q_ctxt is the context the plugin supplied
+	 * from \c on_query_new() call.
+	 */
+	ldmsd_jobmgr_qres_list_t (*on_query_ls)(ldmsd_plug_handle_t p,
+			const struct ldmsd_jobmgr_query_s *q, void *q_ctxt);
 
 };
 
