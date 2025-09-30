@@ -246,7 +246,7 @@ void ldmsd_jobset_delete(ldms_set_t set)
 			.mgr = jobset->mgr,
 		};
 
-		ldmsd_jobmgr_event_post(&ev);
+		ldmsd_jobmgr_event_post(&ev, NULL);
 
 		/* delay delete */
 		OVIS_EVENT_INIT(&jobset->del_ev);
@@ -261,6 +261,7 @@ void ldmsd_jobset_delete(ldms_set_t set)
 
 typedef struct jobmgr_ev_s {
 	struct ldmsd_jobmgr_event job_ev;
+	void *ctxt; /* event context from the plugin */
 	struct ovis_event_s ovis_ev;
 } *jobmgr_ev_t;
 
@@ -268,6 +269,8 @@ struct ldmsd_jobmgr_event_client_s {
 	TAILQ_ENTRY(ldmsd_jobmgr_event_client_s) entry;
 	ldmsd_jobmgr_event_cb_fn_t cb;
 	void *arg;
+	int is_default_query; /* q is default query */
+	const_ldmsd_jobmgr_query_t q;
 	int list_ref; /* protected by client_tq_mutex */
 };
 TAILQ_HEAD(jobmgr_client_tq, ldmsd_jobmgr_event_client_s);
@@ -282,13 +285,41 @@ static void job_event_cb(ovis_event_t oev)
 	jobmgr_ev_t jev = oev->param.ctxt;
 	struct jobmgr_client_tq rm_tq = TAILQ_HEAD_INITIALIZER(rm_tq);
 	ldmsd_jobmgr_event_client_t c, _c;
+	ldmsd_cfgobj_jobmgr_t mgr;
+	int i, rc;
+	void *q_ctxt;
+
+	mgr = container_of(jev->job_ev.mgr, struct ldmsd_cfgobj_jobmgr, cfg);
 	CLIENT_TQ_LOCK();
 	c = TAILQ_FIRST(&client_tq);
 	while (c) {
 		assert(c->list_ref > 0);
 		c->list_ref++;
 		CLIENT_TQ_UNLOCK();
-		c->cb(c, &jev->job_ev, c->arg);
+
+		/* reuse job_ev for each client */
+		jev->job_ev.q = c->q;
+		jev->job_ev.res = NULL;
+		q_ctxt = NULL;
+		for (i = 0; i < c->q->n_jobmgrs; i++) {
+			if (c->q->jobmgrs[i] == jev->job_ev.mgr) {
+				/* found! */
+				q_ctxt = c->q->jobmgrs_ctxt[i];
+				break;
+			}
+		}
+		if (jev->job_ev.type != LDMSD_JOBMGR_SET_DELETE) {
+			rc = mgr->api->make_event_qres(jev->job_ev.mgr, &jev->job_ev, q_ctxt, jev->ctxt);
+		} else {
+			rc = 0;
+		}
+		if (0 == rc) {
+			c->cb(c, &jev->job_ev, c->arg);
+		}
+		if (jev->job_ev.res) {
+			free((void*)jev->job_ev.res);
+		}
+
 		CLIENT_TQ_LOCK();
 		c->list_ref--;
 		if (0 == c->list_ref) {
@@ -302,6 +333,9 @@ static void job_event_cb(ovis_event_t oev)
 	}
 	CLIENT_TQ_UNLOCK();
 
+	/* done with the event */
+	mgr->api->event_done(jev->job_ev.mgr, &jev->job_ev, jev->ctxt);
+
 	while ((c = TAILQ_FIRST(&rm_tq))) {
 		TAILQ_REMOVE(&rm_tq, c, entry);
 		__client_finalize(c);
@@ -309,7 +343,7 @@ static void job_event_cb(ovis_event_t oev)
 }
 
 
-int ldmsd_jobmgr_event_post(const struct ldmsd_jobmgr_event *ev)
+int ldmsd_jobmgr_event_post(const struct ldmsd_jobmgr_event *ev, void *ctxt)
 {
 	int rc;
 	jobmgr_ev_t jev = calloc(1, sizeof(*jev));
@@ -317,6 +351,7 @@ int ldmsd_jobmgr_event_post(const struct ldmsd_jobmgr_event *ev)
 	if (!jev)
 		return ENOMEM;
 
+	jev->ctxt = ctxt;
 	OVIS_EVENT_INIT(&jev->ovis_ev);
 
 	jev->job_ev = *ev; /* copy */
@@ -333,7 +368,9 @@ int ldmsd_jobmgr_event_post(const struct ldmsd_jobmgr_event *ev)
 	return 0;
 }
 
-ldmsd_jobmgr_event_client_t ldmsd_jobmgr_event_subscribe(ldmsd_jobmgr_event_cb_fn_t cb, void *arg)
+ldmsd_jobmgr_event_client_t
+ldmsd_jobmgr_event_subscribe(const_ldmsd_jobmgr_query_t q,
+			     ldmsd_jobmgr_event_cb_fn_t cb, void *arg)
 {
 	ldmsd_jobmgr_event_client_t c;
 
@@ -343,6 +380,16 @@ ldmsd_jobmgr_event_client_t ldmsd_jobmgr_event_subscribe(ldmsd_jobmgr_event_cb_f
 	c->arg = arg;
 	c->cb = cb;
 	c->list_ref = 1;
+	if (!q) {
+		q = ldmsd_jobmgr_query_new(0, NULL);
+		if (!q) {
+			free(c);
+			c = NULL;
+			goto out;
+		}
+		c->is_default_query = 1;
+	}
+	c->q = q;
 	CLIENT_TQ_LOCK();
 	TAILQ_INSERT_TAIL(&client_tq, c, entry);
 	CLIENT_TQ_UNLOCK();
@@ -620,6 +667,22 @@ ldmsd_jobmgr_query_t ldmsd_jobmgr_query_new(int n, const char *metrics[])
 	size_t sz;
 	off_t off;
 	int rc;
+	struct rbn *rbn;
+	struct jobmgr_mtmp_s *mtmp;
+	const char *_metrics[512] = {0}; /* should suffice */
+
+	if (n == 0 || metrics == NULL) {
+		JOBMGR_MTMP_RBT_LOCK();
+		n = jobmgr_mtmp_rbt.card;
+		metrics = _metrics;
+		rbn = rbt_min(&jobmgr_mtmp_rbt);
+		for (i = 0; i < n && rbn; i++) {
+			mtmp = container_of(rbn, struct jobmgr_mtmp_s, rbn);
+			metrics[i] = mtmp->tmp.name;
+			rbn = rbn_succ(rbn);
+		}
+		JOBMGR_MTMP_RBT_UNLOCK();
+	}
 
 	ldmsd_cfg_lock(LDMSD_CFGOBJ_JOBMGR);
 	/* get card */
@@ -708,7 +771,7 @@ void ldmsd_jobmgr_query_free(ldmsd_jobmgr_query_t q)
 	free(q);
 }
 
-ldmsd_jobmgr_qres_list_t ldmsd_jobmgr_query_ls(ldmsd_jobmgr_query_t q)
+ldmsd_jobmgr_qres_list_t ldmsd_jobmgr_query_ls(const_ldmsd_jobmgr_query_t q)
 {
 	ldmsd_jobmgr_qres_list_t lst, _lst;
 	int i;

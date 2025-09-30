@@ -479,6 +479,12 @@ typedef struct task_data {
 
 } *task_data_t;
 
+struct jobmgr_slurm_ev_ctxt {
+	job_data_t  job;
+	step_data_t step;
+	task_data_t task;
+};
+
 static step_data_t step_data_get(job_data_t job, uint64_t step_id);
 
 static int task_midx_cache[10] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
@@ -766,6 +772,38 @@ static void handle_job_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 
 	ldms_transaction_end(job->set);
 
+	/*
+	 * The slurm "job_init" event does not have all job info available
+	 * (e.g. "local_tasks" value being 0), and those information are
+	 * available in "step_init".
+	 */
+	int init_posted = 0;
+	if (0 == __atomic_compare_exchange_n(&job->init_posted, &init_posted, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+		return; /* init event alread posted */
+
+	/* post JOB_START event */
+	struct ldmsd_jobmgr_event ev = {
+		.type   = LDMSD_JOBMGR_JOB_START,
+		.jobset = job->set,
+		.mgr    = js->plug,
+	};
+
+	struct jobmgr_slurm_ev_ctxt *ev_ctxt;
+	ev_ctxt = calloc(1, sizeof(*ev_ctxt));
+	if (!ev_ctxt)
+		return;
+	ev_ctxt->job = job;
+
+	ldms_set_ref_get(job->set, "jobmgr_event");
+	ldmsd_jobmgr_get(js->plug, "jobmgr_event");
+
+	int rc = ldmsd_jobmgr_event_post(&ev, ev_ctxt);
+	if (rc) {
+		free(ev_ctxt);
+		ldms_set_ref_put(job->set, "jobmgr_event");
+		ldmsd_jobmgr_put(js->plug, "jobmgr_event");
+	}
+
 	return;
 
  err:
@@ -926,29 +964,26 @@ static void handle_step_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 
 	ldms_transaction_end(job->set);
 
-	/* We may have multiple step init events in a job.
-	 * The only first one shall result in "job_start" event.
-	 * The slurm "job_init" event does not have all job info available
-	 * (e.g. "local_tasks" value being 0), and those information are
-	 * available in "step_init".
-	 */
-	int init_posted = 0;
-	if (0 == __atomic_compare_exchange_n(&job->init_posted, &init_posted, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
-		return; /* init event alread posted */
-
-	/* post JOB_START event */
+	/* post STEP_START event */
 	struct ldmsd_jobmgr_event ev = {
-		.type   = LDMSD_JOBMGR_JOB_START,
+		.type   = LDMSD_JOBMGR_STEP_START,
 		.jobset = job->set,
 		.mgr    = js->plug,
 	};
 
+	struct jobmgr_slurm_ev_ctxt *ev_ctxt;
+	ev_ctxt = calloc(1, sizeof(*ev_ctxt));
+	if (!ev_ctxt)
+		return;
+	ev_ctxt->job = job;
+	ev_ctxt->step = step;
+
 	ldms_set_ref_get(job->set, "jobmgr_event");
 	ldmsd_jobmgr_get(js->plug, "jobmgr_event");
 
-	/* TODO FIX ME POST STEP EVENT */
-	int rc = ldmsd_jobmgr_event_post(&ev);
+	int rc = ldmsd_jobmgr_event_post(&ev, ev_ctxt);
 	if (rc) {
+		free(ev_ctxt);
 		ldms_set_ref_put(job->set, "jobmgr_event");
 		ldmsd_jobmgr_put(js->plug, "jobmgr_event");
 	}
@@ -1048,11 +1083,20 @@ static void handle_task_init(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 		.task_record = task->task_rec,
 	};
 
+	struct jobmgr_slurm_ev_ctxt *ev_ctxt;
+	ev_ctxt = calloc(1, sizeof(*ev_ctxt));
+	if (!ev_ctxt)
+		return;
+	ev_ctxt->job  = job;
+	ev_ctxt->step = task->step;
+	ev_ctxt->task = task;
+
 	ldms_set_ref_get(job->set, "jobmgr_event");
 	ldmsd_jobmgr_get(js->plug, "jobmgr_event");
 
-	int rc = ldmsd_jobmgr_event_post(&ev);
+	int rc = ldmsd_jobmgr_event_post(&ev, ev_ctxt);
 	if (rc) {
+		free(ev_ctxt);
 		ldms_set_ref_put(job->set, "jobmgr_event");
 		ldmsd_jobmgr_put(js->plug, "jobmgr_event");
 	}
@@ -1131,11 +1175,20 @@ static void handle_task_exit(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 		.task_record = task->task_rec,
 	};
 
+	struct jobmgr_slurm_ev_ctxt *ev_ctxt;
+	ev_ctxt = calloc(1, sizeof(*ev_ctxt));
+	if (!ev_ctxt)
+		return;
+	ev_ctxt->job  = job;
+	ev_ctxt->step = task->step;
+	ev_ctxt->task = task;
+
 	ldms_set_ref_get(job->set, "jobmgr_event");
 	ldmsd_jobmgr_get(js->plug, "jobmgr_event");
 
-	int rc = ldmsd_jobmgr_event_post(&ev);
+	int rc = ldmsd_jobmgr_event_post(&ev, ev_ctxt);
 	if (rc) {
+		free(ev_ctxt);
 		ldms_set_ref_put(job->set, "jobmgr_event");
 		ldmsd_jobmgr_put(js->plug, "jobmgr_event");
 	}
@@ -1183,16 +1236,25 @@ static void handle_step_exit(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 	step->step_end.sec = json_value_int(av);
 	step->step_end.usec = 0;
 
-	/* TODO correct the event */
 	struct ldmsd_jobmgr_event ev = {
 		.type   = LDMSD_JOBMGR_STEP_END,
 		.mgr    = js->plug,
 		.jobset = job->set,
 	};
+
+	struct jobmgr_slurm_ev_ctxt *ev_ctxt;
+	ev_ctxt = calloc(1, sizeof(*ev_ctxt));
+	if (!ev_ctxt)
+		return;
+	ev_ctxt->job  = job;
+	ev_ctxt->step = step;
+
 	ldms_set_ref_get(job->set, "jobmgr_event");
 	ldmsd_jobmgr_get(js->plug, "jobmgr_event");
-	rc = ldmsd_jobmgr_event_post(&ev);
+
+	rc = ldmsd_jobmgr_event_post(&ev, ev_ctxt);
 	if (rc) {
+		free(ev_ctxt);
 		ldms_set_ref_put(job->set, "jobmgr_event");
 		ldmsd_jobmgr_put(js->plug, "jobmgr_event");
 	}
@@ -1226,10 +1288,19 @@ static void handle_job_exit(jobmgr_slurm_t js, job_data_t job, json_entity_t e)
 		.mgr    = js->plug,
 		.jobset = job->set,
 	};
+
+	struct jobmgr_slurm_ev_ctxt *ev_ctxt;
+	ev_ctxt = calloc(1, sizeof(*ev_ctxt));
+	if (!ev_ctxt)
+		return;
+	ev_ctxt->job  = job;
+
 	ldms_set_ref_get(job->set, "jobmgr_event");
 	ldmsd_jobmgr_get(js->plug, "jobmgr_event");
-	rc = ldmsd_jobmgr_event_post(&ev);
+
+	rc = ldmsd_jobmgr_event_post(&ev, ev_ctxt);
 	if (rc) {
+		free(ev_ctxt);
 		ldms_set_ref_put(job->set, "jobmgr_event");
 		ldmsd_jobmgr_put(js->plug, "jobmgr_event");
 	}
@@ -1563,7 +1634,8 @@ int make_qres(struct query_ctxt *ctxt,
 			      ldmsd_jobmgr_qres_list_t list,
 			      job_data_t job,
 			      step_data_t step,
-			      task_data_t task)
+			      task_data_t task,
+			      ldmsd_jobmgr_qres_t *out)
 {
 	int i;
 	ldms_mval_t mv;
@@ -1578,7 +1650,10 @@ int make_qres(struct query_ctxt *ctxt,
 		mv = ldmsd_jobmgr_qres_mval(ctxt->q, qres, i);
 		mv_assign(ctxt->mdesc[i], mv, job, step, task);
 	}
-	TAILQ_INSERT_TAIL(&list->tailq, qres, entry);
+	if (list)
+		TAILQ_INSERT_TAIL(&list->tailq, qres, entry);
+	if (out)
+		*out = qres;
 	return 0;
 }
 
@@ -1591,10 +1666,10 @@ static int task_ls(step_data_t step, struct query_ctxt *ctxt,
 	rbn = rbt_min(&step->task_rbt);
 	task = rbn?container_of(rbn, struct task_data, rbn):NULL;
 	if (!task) {
-		make_qres(ctxt, list, step->job, step, NULL);
+		make_qres(ctxt, list, step->job, step, NULL, NULL);
 	}
 	while (task) {
-		make_qres(ctxt, list, step->job, step, task);
+		make_qres(ctxt, list, step->job, step, task, NULL);
 		rbn = rbn_succ(rbn);
 		task = rbn?container_of(rbn, struct task_data, rbn):NULL;
 	}
@@ -1610,11 +1685,11 @@ static int step_ls(job_data_t job, struct query_ctxt *ctxt,
 	rbn = rbt_min(&job->step_rbt);
 	step = rbn?container_of(rbn, struct step_data, rbn):NULL;
 	if (!step) {
-		make_qres(ctxt, list, job, NULL, NULL);
+		make_qres(ctxt, list, job, NULL, NULL, NULL);
 	}
 	while (step) {
 		if (ctxt->level == 1) {
-			make_qres(ctxt, list, job, step, NULL);
+			make_qres(ctxt, list, job, step, NULL, NULL);
 			goto next;
 		}
 		/* otherwise, traverse the tasks */
@@ -1636,7 +1711,7 @@ static int job_ls(jobmgr_slurm_t js, struct query_ctxt *ctxt,
 	job = rbn?container_of(rbn, struct job_data, rbn):NULL;
 	while (job) {
 		if (ctxt->level == 0) {
-			make_qres(ctxt, list, job, NULL, NULL);
+			make_qres(ctxt, list, job, NULL, NULL, NULL);
 			goto next;
 		}
 		/* otherwise, traverse the steps */
@@ -1665,6 +1740,25 @@ static ldmsd_jobmgr_qres_list_t on_query_ls(ldmsd_plug_handle_t p,
 	return list;
 }
 
+static int make_event_qres(ldmsd_plug_handle_t p, struct ldmsd_jobmgr_event *ev,
+			   void *_q_ctxt, void *_ev_ctxt)
+{
+	struct query_ctxt *q_ctxt = _q_ctxt;
+	struct jobmgr_slurm_ev_ctxt *ev_ctxt = _ev_ctxt;
+	int rc;
+
+	rc = make_qres(q_ctxt, NULL, ev_ctxt->job, ev_ctxt->step,
+		       ev_ctxt->task, (void*)&ev->res);
+	return rc;
+}
+
+void event_done(ldmsd_plug_handle_t p,
+		struct ldmsd_jobmgr_event *ev,
+		void *ev_ctxt)
+{
+	free(ev_ctxt);
+}
+
 struct ldmsd_jobmgr ldmsd_plugin_interface = {
 	.base = {
 		.type = LDMSD_PLUGIN_JOBMGR,
@@ -1679,6 +1773,8 @@ struct ldmsd_jobmgr ldmsd_plugin_interface = {
 	.on_query_new = on_query_new,
 	.on_query_free = on_query_free,
 	.on_query_ls = on_query_ls,
+	.make_event_qres = make_event_qres,
+	.event_done = event_done,
 };
 
 static int __mdesc_cmp(const void *_a, const void *_b)

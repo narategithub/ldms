@@ -59,6 +59,7 @@ typedef struct test_jobmgr_samp_s {
 	ldmsd_jobmgr_event_client_t c;
 	FILE *f;
 	ldmsd_jobmgr_query_t q;
+	int subscribe;
 } *test_jobmgr_samp_t;
 
 const char *_usage = "\
@@ -137,7 +138,7 @@ void print_task(char *buf, size_t bufsz, const struct ldmsd_jobmgr_event *ev)
 		);
 }
 
-void jobmgr_cb(ldmsd_jobmgr_event_client_t c,
+void do_jobset(ldmsd_jobmgr_event_client_t c,
 		const struct ldmsd_jobmgr_event *ev, void *arg)
 {
 	test_jobmgr_samp_t j = arg;
@@ -175,6 +176,124 @@ void jobmgr_cb(ldmsd_jobmgr_event_client_t c,
 	}
 }
 
+int qres_print(const_ldmsd_jobmgr_query_t q, const_ldmsd_jobmgr_qres_t res,
+	       char *buf, size_t bufsz)
+{
+	off_t off = 0;
+	int i, rc;
+	const struct ldmsd_jobmgr_query_metric_desc_s *md;
+	ldms_mval_t mv;
+	const char *sep = "";
+	rc = 0;
+	i = 0;
+	off += snprintf(buf+off, bufsz-off, "{");
+ loop:
+	if (i == q->n_metrics)
+		goto done;
+	md = &q->mdesc[i];
+	mv = ldmsd_jobmgr_qres_mval(q, res, i);
+	switch (md->type) {
+	case LDMS_V_S8:
+		off += snprintf(buf+off, bufsz-off, "%s\"%s\":%hhd", sep, md->name,mv->v_s8);
+		break;
+	case LDMS_V_U8:
+		off += snprintf(buf+off, bufsz-off, "%s\"%s\":%hhu", sep, md->name,mv->v_u8);
+		break;
+	case LDMS_V_S16:
+		off += snprintf(buf+off, bufsz-off, "%s\"%s\":%hd", sep, md->name,mv->v_s16);
+		break;
+	case LDMS_V_U16:
+		off += snprintf(buf+off, bufsz-off, "%s\"%s\":%hu", sep, md->name,mv->v_u16);
+		break;
+	case LDMS_V_S32:
+		off += snprintf(buf+off, bufsz-off, "%s\"%s\":%d", sep, md->name,mv->v_s32);
+		break;
+	case LDMS_V_U32:
+		off += snprintf(buf+off, bufsz-off, "%s\"%s\":%u", sep, md->name,mv->v_u32);
+		break;
+	case LDMS_V_S64:
+		off += snprintf(buf+off, bufsz-off, "%s\"%s\":%ld", sep, md->name,mv->v_s64);
+		break;
+	case LDMS_V_U64:
+		off += snprintf(buf+off, bufsz-off, "%s\"%s\":%lu", sep, md->name,mv->v_u64);
+		break;
+	case LDMS_V_F32:
+		off += snprintf(buf+off, bufsz-off, "%s\"%s\":%f", sep, md->name,mv->v_f);
+		break;
+	case LDMS_V_D64:
+		off += snprintf(buf+off, bufsz-off, "%s\"%s\":%lf", sep, md->name,mv->v_d);
+		break;
+	case LDMS_V_CHAR_ARRAY:
+		off += snprintf(buf+off, bufsz-off, "%s\"%s\":\"%s\"", sep, md->name,mv->a_char);
+		break;
+	case LDMS_V_TIMESTAMP:
+		off += snprintf(buf+off, bufsz-off, "%s\"%s\":%d.%06d", sep, md->name,mv->v_ts.sec, mv->v_ts.usec);
+		break;
+	default:
+		goto next;
+	}
+	sep = ",";
+	if (off >= bufsz) {
+		rc = ENOBUFS;
+		goto out;
+	}
+ next:
+	i += 1;
+	goto loop;
+ done:
+	off += snprintf(buf+off, bufsz-off, "}");
+	if (off >= bufsz)
+		rc = ENOBUFS;
+ out:
+	return rc;
+}
+
+void do_qres(ldmsd_jobmgr_event_client_t c,
+		const struct ldmsd_jobmgr_event *ev, void *arg)
+{
+	test_jobmgr_samp_t j = arg;
+	char buf[4096];
+
+	if (ev->type == LDMSD_JOBMGR_SET_DELETE)
+		return;
+	if (ev->type == LDMSD_JOBMGR_CLIENT_CLOSE)
+		return;
+	qres_print(ev->q, ev->res, buf, sizeof(buf));
+
+	switch (ev->type) {
+	case LDMSD_JOBMGR_JOB_START:
+		fprintf(j->f, "job_start: %s\n", buf);
+		break;
+	case LDMSD_JOBMGR_TASK_START:
+		fprintf(j->f, "task_start: %s\n", buf);
+		break;
+	case LDMSD_JOBMGR_TASK_END:
+		fprintf(j->f, "task_end: %s\n", buf);
+		break;
+	case LDMSD_JOBMGR_JOB_END:
+		fprintf(j->f, "job_end: %s\n", buf);
+		break;
+	case LDMSD_JOBMGR_CLIENT_CLOSE:
+		fprintf(j->f, "client_close\n");
+		ref_put(&j->ref, "jobmgr_cb");
+		break;
+	case LDMSD_JOBMGR_STEP_START:
+		fprintf(j->f, "step_start: %s\n", buf);
+		break;
+	case LDMSD_JOBMGR_STEP_END:
+		fprintf(j->f, "step_end: %s\n", buf);
+		break;
+	default:
+		break;
+	}
+}
+
+void jobmgr_cb(ldmsd_jobmgr_event_client_t c,
+		const struct ldmsd_jobmgr_event *ev, void *arg)
+{
+	do_qres(c, ev, arg);
+}
+
 #define LOG_ERROR(handle, fmt, ...)  \
 		ovis_log(ldmsd_plug_log_get(handle), \
 			 OVIS_LERROR, fmt, ## __VA_ARGS__ )
@@ -186,6 +305,13 @@ static int config(ldmsd_plug_handle_t handle,
 	test_jobmgr_samp_t j = ldmsd_plug_ctxt_get(handle);
 	if (j->c)
 		return EEXIST;
+	const char *metrics[] = {
+		"job_id", "step_id", "task_id", "task_pid",
+		"job_start", "job_end", "step_start", "step_end",
+		"task_start", "task_end"
+	};
+	j->q = ldmsd_jobmgr_query_new(sizeof(metrics)/sizeof(metrics[0]), metrics);
+
 	val = av_value(avl, "file");
 	if (!val) {
 		LOG_ERROR(handle, "'file' attribute is required.\n");
@@ -197,21 +323,19 @@ static int config(ldmsd_plug_handle_t handle,
 		goto err;
 	}
 	setbuf(j->f, NULL);
-	/*
-	ref_get(&j->ref, "jobmgr_cb");
-	j->c = ldmsd_jobmgr_event_subscribe(jobmgr_cb, j);
-	if (!j->c) {
-		ref_put(&j->ref, "jobmgr_cb");
-		LOG_ERROR(handle, "jobmgr subscribe error: %d\n", errno);
-		goto err;
+	val = av_value(avl, "subscribe");
+	if (!val || 0 == atoi(val)) {
+		j->subscribe = 0;
+	} else {
+		j->subscribe = 1;
+		ref_get(&j->ref, "jobmgr_cb");
+		j->c = ldmsd_jobmgr_event_subscribe(j->q, jobmgr_cb, j);
+		if (!j->c) {
+			ref_put(&j->ref, "jobmgr_cb");
+			LOG_ERROR(handle, "jobmgr subscribe error: %d\n", errno);
+			goto err;
+		}
 	}
-	*/
-	const char *metrics[] = {
-		"job_id", "step_id", "task_id", "task_pid",
-		"job_start", "job_end", "step_start", "step_end",
-		"task_start", "task_end"
-	};
-	j->q = ldmsd_jobmgr_query_new(sizeof(metrics)/sizeof(metrics[0]), metrics);
 	return 0;
 
  err:
@@ -258,6 +382,10 @@ static int sample(ldmsd_plug_handle_t handle)
 	ldmsd_jobmgr_qres_t qres;
 	ldms_mval_t mv;
 	const char *sep = "";
+
+	if (j->subscribe)
+		return 0;
+
 	list = ldmsd_jobmgr_query_ls(j->q);
 	if (!list)
 		goto out;

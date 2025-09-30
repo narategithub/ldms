@@ -87,7 +87,6 @@ struct ldmsd_jobmgr_query_metric_desc_s {
 	off_t off; /* offset from the beginning of the result data */
 };
 
-typedef
 struct ldmsd_jobmgr_query_s {
 	size_t qres_size; /* size of each query result in bytes */
 	int n_metrics; /* number of metrics in each result */
@@ -97,13 +96,19 @@ struct ldmsd_jobmgr_query_s {
 	struct ldmsd_cfgobj_jobmgr **jobmgrs; /* array of plugins */
 	void **jobmgrs_ctxt; /* array of context for each plugin */
 
-} *ldmsd_jobmgr_query_t;
+};
+typedef struct ldmsd_jobmgr_query_s *ldmsd_jobmgr_query_t;
+typedef const struct ldmsd_jobmgr_query_s *const_ldmsd_jobmgr_query_t;
 
 /**
  * \brief Create a query handle.
  *
+ * If \c n is 0 or \c metrics is \c NULL, the query gets all available metrics.
  * The returned query handle \c q can be used repeatedly in
- * \c ldmsd_jobmgr_query_ls()
+ * \c ldmsd_jobmgr_query_ls().
+ *
+ * \param n       The number of elements in \c metrics.
+ * \param metrics An array of char* identifying job metrics.
  *
  * \retval q The query handle.
  * \retval NULL If there is an error, \c errno will describe the error.
@@ -118,18 +123,19 @@ void ldmsd_jobmgr_query_free(ldmsd_jobmgr_query_t q);
 /**
  * Individual query result.
  */
-typedef struct ldmsd_jobmgr_qres_s {
+struct ldmsd_jobmgr_qres_s {
 	TAILQ_ENTRY(ldmsd_jobmgr_qres_s) entry;
 	char data[];
 	/* data format: mval0 mval1 mval2 ... according to `metrics` given
 	 * to `ldmsd_jobmgr_query_new()`
 	 */
-} *ldmsd_jobmgr_qres_t;
+};
+typedef struct ldmsd_jobmgr_qres_s *ldmsd_jobmgr_qres_t;
+typedef const struct ldmsd_jobmgr_qres_s *const_ldmsd_jobmgr_qres_t;
 
 static inline ldms_mval_t
-ldmsd_jobmgr_qres_mval(const struct ldmsd_jobmgr_query_s *q,
-			    ldmsd_jobmgr_qres_t r,
-			    int idx)
+ldmsd_jobmgr_qres_mval(const_ldmsd_jobmgr_query_t q,
+		       const_ldmsd_jobmgr_qres_t r, int idx)
 {
 	if (idx < 0 || idx >= q->n_metrics) {
 		errno = EINVAL;
@@ -154,10 +160,11 @@ typedef struct ldmsd_jobmgr_qres_list_s {
  * \retval NULL If there is an error, \c errno also set to describe the error.
  * \retval list The pointer to the list of query results.
  */
-ldmsd_jobmgr_qres_list_t ldmsd_jobmgr_query_ls(ldmsd_jobmgr_query_t q);
+ldmsd_jobmgr_qres_list_t ldmsd_jobmgr_query_ls(const_ldmsd_jobmgr_query_t q);
 
 void ldmsd_jobmgr_qres_list_free(ldmsd_jobmgr_qres_list_t l);
 
+struct ldmsd_jobmgr_event; /* see definition below */
 
 /* jobmgr API */
 struct ldmsd_jobmgr {
@@ -194,6 +201,29 @@ struct ldmsd_jobmgr {
 	 */
 	ldmsd_jobmgr_qres_list_t (*on_query_ls)(ldmsd_plug_handle_t p,
 			const struct ldmsd_jobmgr_query_s *q, void *q_ctxt);
+
+	/*
+	 * This function is called by ldmsd_jobmgr subsystem to fill in
+	 * ev->qres given ev (with ev->q already specified).
+	 *
+	 * The `ev_ctxt` is the context provided to the
+	 * ldmsd_jobmgr_event_post() call.
+	 *
+	 * The `q_ctxt` is the query context.
+	 */
+	int (*make_event_qres)(ldmsd_plug_handle_t p,
+				struct ldmsd_jobmgr_event *ev,
+				void *q_ctxt,
+				void *ev_ctxt);
+
+	/*
+	 * This is called when ldmsd_jobmgr is done with the ev.
+	 * The plugin can then clean up the `ev_ctxt` provided to the
+	 * ldmsd_jobmgr_event_post() call.
+	 */
+	void (*event_done)(ldmsd_plug_handle_t p,
+			   struct ldmsd_jobmgr_event *ev,
+			   void *ev_ctxt);
 
 };
 
@@ -345,12 +375,15 @@ struct ldmsd_jobmgr_event {
 	ldmsd_plug_handle_t mgr; /* The job manager plugin that posted the event */
 	ldms_set_t  jobset;     /* for client side convenience */
 	ldms_mval_t task_record; /* NULL if type is not LDMSD_JOBMGR_TASK_{START|END} */
+
+	const_ldmsd_jobmgr_query_t q; /* query handle */
+	const_ldmsd_jobmgr_qres_t  res; /* query result related to the event */
 };
 
 /**
  * \brief Post an event to ldmsd job event notification system.
  */
-int ldmsd_jobmgr_event_post(const struct ldmsd_jobmgr_event *ev);
+int ldmsd_jobmgr_event_post(const struct ldmsd_jobmgr_event *ev, void *ctxt);
 
 typedef struct ldmsd_jobmgr_event_client_s *ldmsd_jobmgr_event_client_t;
 
@@ -365,6 +398,12 @@ typedef void (*ldmsd_jobmgr_event_cb_fn_t)(ldmsd_jobmgr_event_client_t c,
  * posted by a job manager plugin. The \c arg specified here will be supplied to
  * \c arg argument when the \c cb() is called.
  *
+ * If query \c q is \c NULL, the default query with all available metrics will
+ * be used. In this case, the consumer must NOT free the default query. The
+ * query \c q specifies metrics the subscriber wants in the \c ev->qres in the
+ * event callback.
+ *
+ * \param q   The query handle (can be \c NULL).
  * \param cb  The callback function (see \c ldmsd_jobmgr_event_cb_fn_t).
  * \param arg The argument supplied to \c arg in \c cb function.
  *
@@ -372,7 +411,9 @@ typedef void (*ldmsd_jobmgr_event_cb_fn_t)(ldmsd_jobmgr_event_client_t c,
  * \retval NULL   If subscription failed. \c errno will be set to describe the
  *                error.
  */
-ldmsd_jobmgr_event_client_t ldmsd_jobmgr_event_subscribe(ldmsd_jobmgr_event_cb_fn_t cb, void *arg);
+ldmsd_jobmgr_event_client_t
+ldmsd_jobmgr_event_subscribe(const_ldmsd_jobmgr_query_t q,
+			     ldmsd_jobmgr_event_cb_fn_t cb, void *arg);
 
 /**
  * \brief Terminating the job event client.
