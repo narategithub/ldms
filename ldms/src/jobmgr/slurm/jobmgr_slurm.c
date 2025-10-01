@@ -253,7 +253,7 @@ static int config(ldmsd_plug_handle_t p, struct attr_value_list *kwl, struct att
 			goto enomem;
 		}
 	}
-	js->ch_name = val;
+	js->ch_name = strdup(val);
 
 	val = av_value(avl, "component_id");
 	if (!val) {
@@ -263,7 +263,7 @@ static int config(ldmsd_plug_handle_t p, struct attr_value_list *kwl, struct att
 		if (!val)
 			goto enomem;
 	}
-	js->component_id = val;
+	js->component_id = strdup(val);
 
 	return 0;
  enomem:
@@ -378,7 +378,7 @@ static ldms_schema_t get_job_schema(ldmsd_plug_handle_t p)
 }
 
 /* return 0 if transition failed */
-static int jobmgr_slurm_transition(jobmgr_slurm_t js,
+static inline int jobmgr_slurm_transition(jobmgr_slurm_t js,
 		enum jobmgr_slurm_state_e from,
 		enum jobmgr_slurm_state_e to,
 		enum jobmgr_slurm_state_e *prev)

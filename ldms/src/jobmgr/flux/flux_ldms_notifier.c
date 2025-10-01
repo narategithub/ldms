@@ -55,6 +55,8 @@
 #include <jansson.h>
 #include <stdarg.h>
 #include <semaphore.h>
+#include <time.h>
+#include <pwd.h>
 
 #include "flux/core.h"
 #include "flux/shell.h"
@@ -200,9 +202,16 @@ static int cb(flux_plugin_t *p, const char *topic,
 	char *str = NULL;
 	int rc;
 	ldms_t x;
+	uid_t uid = getuid();
+	gid_t gid = getgid();
 	struct xprt_ctxt xctxt = { };
+	time_t ts = time(NULL);
+
+	struct passwd *pwd_ent;
 
 	pid_t pid = getpid();
+
+	pwd_ent = getpwuid(uid);
 
 	flux_shell_t *shell = flux_plugin_get_shell(p);
 
@@ -225,12 +234,28 @@ static int cb(flux_plugin_t *p, const char *topic,
 		flog("arg: %s\n", (char*)arg);
 	}
 
+	char *prog = NULL, *arg0 = NULL;
+	flux_shell_info_unpack(shell, "{s{s[{s[ss]}]}}",
+			"jobspec", "tasks", "command", &prog, &arg0);
+	flog("prog: %s\n", prog);
+	flog("arg0: %s\n", arg0);
+	if (0 == strcmp(prog, "flux") && 0 == strcmp(arg0, "broker")) {
+		if (0 == strncmp(topic, "task.", 5)) {
+			/* ignore tasks that run (sub) brokers */
+			goto out;
+		}
+	}
+
 	char *json_str = NULL;
 
 	json_t *root;
 	root = json_object();
 
 	json_object_set(root, "event", json_string(topic));
+	json_object_set(root, "uid", json_integer(uid));
+	json_object_set(root, "gid", json_integer(gid));
+	json_object_set(root, "user", json_string(pwd_ent?pwd_ent->pw_name:"<UNKNOWN>"));
+	json_object_set(root, "ts", json_integer(ts));
 
 	json_t *jobspec_info, *shell_info, *rank_info, *task_info;
 	json_error_t json_error;
@@ -302,14 +327,19 @@ static int cb(flux_plugin_t *p, const char *topic,
 	/* -------------- */
 
 	json_t *shell_id = json_array();
+	json_t *shell_id_f58 = json_array();
 	int i;
 	struct id_array a = {};
 	walk_pid(pid, &a);
 	flog("done walk_pid, n: %d\n", a.n);
 	for (i = a.n - 1; i >= 0; i--) {
+		char buf[16];
 		json_array_append(shell_id, json_integer(a.ids[i]));
+		flux_job_id_encode(a.ids[i], "f58plain", buf, sizeof(buf));
+		json_array_append(shell_id_f58, json_string(buf));
 	}
 	json_object_set(root, "shell_id", shell_id);
+	json_object_set(root, "shell_id_f58", shell_id_f58);
 
 	sem_init(&xctxt.sem, 0, 0);
 
