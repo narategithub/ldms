@@ -120,7 +120,7 @@ ldms_msg_chan_t ldms_msg_chan_new(const char *app_name,
  */
 int ldms_msg_chan_publish(ldms_msg_chan_t chan, const char *tag,
 			  uid_t uid, gid_t gid, uint32_t perm,
-			  ldms_msg_type_t type, char *msg, size_t msg_len);
+			  ldms_msg_type_t type, const char *msg, size_t msg_len);
 
 /**
  * \brief Subscribe to receive messages on a channel
@@ -149,6 +149,24 @@ int ldms_msg_chan_publish(ldms_msg_chan_t chan, const char *tag,
  * \return ENOMEM memory allocaion error
  */
 int ldms_msg_chan_subscribe(ldms_msg_chan_t chan, const char *regex,
+			    ldms_msg_event_cb_t msg_cb_fn, void *cb_arg);
+
+/**
+ * \brief Subscribe to a specific channel
+ *
+ * This is the same as \c ldms_msg_chan_subscribe(), but for an exact message
+ * tag name.
+ *
+ * \param chan The Message Channel handle
+ * \param name The name of the message tag
+ * \param msg_cb_fn The function that will receive messages
+ * \param cb_arg A value delivered to \c msg_cb_fn in addition to the
+ * message event.
+ *
+ * \return 0 on success
+ * \return ENOMEM memory allocaion error
+ */
+int ldms_msg_chan_subscribe_exact(ldms_msg_chan_t chan, const char *name,
 			    ldms_msg_event_cb_t msg_cb_fn, void *cb_arg);
 
 
