@@ -66,7 +66,11 @@ static int LDEBUG  = OVIS_LDEBUG;
 typedef struct chan_client_s {
 	ldms_msg_chan_t chan;
 	ldms_msg_client_t client;
-	char *regex_s;
+	union {
+		char *regex_s;
+		char *match;
+	};
+	int is_regex;
 	ldms_msg_event_cb_t msg_cb_fn;
 	void *msg_cb_arg;
 	LIST_ENTRY(chan_client_s) entry;
@@ -248,6 +252,16 @@ static void sched_connect(ldms_msg_chan_t chan, int connect_timeout)
 			 rc, chan->app_name_s);
 }
 
+/* chan->lock is held */
+static void resubscribe(ldms_msg_chan_t chan)
+{
+	chan_client_t subs;
+	LIST_FOREACH(subs, &chan->client_list, entry) {
+		ldms_msg_remote_subscribe(chan->rem_ldms, subs->match,
+				subs->is_regex, NULL, NULL, LDMS_UNLIMITED);
+	}
+}
+
 /*
  * This is the LDMS event callback registered with the pub transport
  */
@@ -279,6 +293,7 @@ static void xprt_cb(ldms_t x, ldms_xprt_event_t e, void *cb_arg)
 			chan->stats.state= LDMS_MSG_CHAN_CONNECTED;
 		}
 		chan->stats.pub_conn_success ++;
+		resubscribe(chan);
 		pthread_cond_broadcast(&chan->io_cond);
 		break;
 	case LDMS_XPRT_EVENT_ERROR:
@@ -538,7 +553,7 @@ ldms_msg_chan_t ldms_msg_chan_new(const char *app_name_s,
 		chan->rem_ss_len = sa_len;
 	}
 
-	if (mode & LDMS_MSG_CHAN_MODE_SUBSCRIBE) {
+	if ((mode & LDMS_MSG_CHAN_MODE_SUBSCRIBE) && lcl_port > 0) {
 		errno = EINVAL;
 		if (!lcl_host_s || lcl_port < 1 || lcl_port > 65535)
 			goto err_1;
@@ -581,7 +596,7 @@ ldms_msg_chan_t ldms_msg_chan_new(const char *app_name_s,
 		goto err_1;
 	chan->auth_avl = av_copy(auth_avl);
 
-	if (mode & LDMS_MSG_CHAN_MODE_SUBSCRIBE) {
+	if ((mode & LDMS_MSG_CHAN_MODE_SUBSCRIBE) && chan->lcl_port) {
 		/* Create the listening endpoint */
 		rc = init_listener(chan);
 		if (rc)
@@ -760,7 +775,7 @@ static void __flush_msg_queue(ldms_msg_chan_t chan)
 
 int ldms_msg_chan_publish(ldms_msg_chan_t chan, const char *tag,
 			  uid_t uid, gid_t gid, uint32_t perm,
-			  ldms_msg_type_t type, char *msg, size_t msg_len)
+			  ldms_msg_type_t type, const char *msg, size_t msg_len)
 {
 	msg_entry_t msg_entry;
 	struct ldms_cred cred = {
@@ -860,8 +875,9 @@ static int __msg_cb_fn(ldms_msg_event_t ev, void *cb_arg)
 	return 0;
 }
 
-int ldms_msg_chan_subscribe(ldms_msg_chan_t chan, const char *regex,
-			    ldms_msg_event_cb_t msg_cb_fn, void *cb_arg)
+static int __ldms_msg_chan_subcribe(ldms_msg_chan_t chan,
+				    const char *match, int is_regex,
+				    ldms_msg_event_cb_t msg_cb_fn, void *cb_arg)
 {
 	char client_desc[512];
 	chan_client_t subs;
@@ -876,10 +892,10 @@ int ldms_msg_chan_subscribe(ldms_msg_chan_t chan, const char *regex,
 	subs = calloc(1, sizeof(*subs));
 	if (!subs)
 		goto err_0;
-	subs->regex_s = strdup(regex);
+	subs->regex_s = strdup(match);
 	if (!subs->regex_s)
 		goto err_1;
-
+	subs->is_regex = is_regex;
 	subs->chan = chan;
 	subs->msg_cb_fn = msg_cb_fn;
 	subs->msg_cb_arg = cb_arg;
@@ -887,17 +903,21 @@ int ldms_msg_chan_subscribe(ldms_msg_chan_t chan, const char *regex,
 	snprintf(client_desc, sizeof(client_desc),
 		 "Message channel '%s:%s' subscription",
 		 chan->app_name_s, subs->regex_s);
-	client = ldms_msg_subscribe(regex, 1,
+	client = ldms_msg_subscribe(match, 1,
 				    __msg_cb_fn, subs,
 				    client_desc);
 	if (!client) {
 		ovis_log(chan_log, LERROR,
 			 "Channel '%s' Could not subscribe to name '%s'\n",
-			 chan->app_name_s, regex);
+			 chan->app_name_s, match);
 		goto err_1;
 	}
 	subs->client = client;
 	LIST_INSERT_HEAD(&chan->client_list, subs, entry);
+	if (chan->stats.state == LDMS_MSG_CHAN_CONNECTED) {
+		ldms_msg_remote_subscribe(chan->rem_ldms, match, is_regex,
+					  NULL, NULL, LDMS_UNLIMITED);
+	}
 	pthread_mutex_unlock(&chan->lock);
 	return 0;
  err_1:
@@ -906,6 +926,18 @@ int ldms_msg_chan_subscribe(ldms_msg_chan_t chan, const char *regex,
  err_0:
 	pthread_mutex_unlock(&chan->lock);
 	return errno;
+}
+
+int ldms_msg_chan_subscribe(ldms_msg_chan_t chan, const char *regex,
+			    ldms_msg_event_cb_t msg_cb_fn, void *cb_arg)
+{
+	return __ldms_msg_chan_subcribe(chan, regex, 1, msg_cb_fn, cb_arg);
+}
+
+int ldms_msg_chan_subscribe_exact(ldms_msg_chan_t chan, const char *name,
+			    ldms_msg_event_cb_t msg_cb_fn, void *cb_arg)
+{
+	return __ldms_msg_chan_subcribe(chan, name, 0, msg_cb_fn, cb_arg);
 }
 
 int ldms_msg_chan_unsubscribe(ldms_msg_chan_t chan, const char *regex_s)
@@ -923,6 +955,11 @@ int ldms_msg_chan_unsubscribe(ldms_msg_chan_t chan, const char *regex_s)
 				 * destroy the subscriber until after
 				 * this event has been delivered.
 				 */
+				if (chan->stats.state == LDMS_MSG_CHAN_CONNECTED) {
+					ldms_msg_remote_unsubscribe(chan->rem_ldms,
+						subs->match, subs->is_regex,
+						NULL, NULL);
+				}
 				ldms_msg_client_close(subs->client);
 				break;
 			}
