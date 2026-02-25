@@ -289,6 +289,8 @@ SUBDIRS += slingshot_info
 endif
 endif
 
+SUBDIRS += msg_feedback
+
 CLEANFILES = $(dist_man7_MANS)
 
 EXTRA_DIST=ldms_sampler_base.rst ldms-sampler_jobid.rst

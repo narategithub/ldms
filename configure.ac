@@ -1090,6 +1090,7 @@ ldms/src/sampler/tsampler/Makefile \
 ldms/src/sampler/zfs_topvdevs/Makefile
 ldms/src/sampler/zfs_leafvdevs/Makefile
 ldms/src/sampler/zfs_zpool/Makefile
+ldms/src/sampler/msg_feedback/Makefile
 ldms/src/contrib/sampler/Makefile
 ldms/src/contrib/sampler/daos/Makefile
 ldms/src/contrib/sampler/daos/test/Makefile
