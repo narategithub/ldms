@@ -111,8 +111,6 @@ static struct {
 } ldms_zap_tbl[16] = {{0}};
 static int ldms_zap_tbl_n = 0;
 
-static int ipv6_enabled;
-
 static char *xprt_event_type_names[] = {
 	[LDMS_XPRT_EVENT_CONNECTED] = "CONNECTED",
 	[LDMS_XPRT_EVENT_REJECTED] = "REJECTED",
@@ -4704,7 +4702,7 @@ int by_name_ai_flags()
 int ldms_xprt_listen_by_name(ldms_t x, const char *host, const char *port_no,
 		ldms_event_cb_t cb, void *cb_arg)
 {
-	int rc;
+	int rc, test_sock;
 	struct addrinfo *ai_list;
 	struct addrinfo *ai, *_ai;
 	struct addrinfo hints = {0};
@@ -4741,9 +4739,9 @@ int ldms_xprt_listen_by_name(ldms_t x, const char *host, const char *port_no,
 	dump_addrinfo_list(ai_list, __func__, __LINE__);
 #endif
 	ai = ai_list;
-	if (ai->ai_family == AF_INET) {
+	if (ai_list->ai_family == AF_INET) {
 		struct sockaddr_in *sin = (void*)ai->ai_addr;
-		if (sin->sin_addr.s_addr == INADDR_ANY && ipv6_enabled) {
+		if (sin->sin_addr.s_addr == INADDR_ANY) {
 			/*
 			 * Special ANY address case. `getaddrinfo()` returned
 			 * IPv4 before IPv6. We prefer IP6 for ANY address as it
@@ -4751,13 +4749,27 @@ int ldms_xprt_listen_by_name(ldms_t x, const char *host, const char *port_no,
 			 * the only ANY for IP4 is returned from
 			 * `getaddrinfo()`.
 			 */
-			_ai = ai; /* save it */
-			for(; ai; ai = ai->ai_next) {
-				if (ai->ai_family == AF_INET6)
+			ai = NULL;
+			for (_ai = ai_list; _ai; _ai = _ai->ai_next) {
+				/*
+				 * Test opening the socket to ensure that the
+				 * family is supported.
+				 */
+				test_sock = socket(_ai->ai_family, SOCK_STREAM, 0);
+				if (test_sock < 0)
+					continue;
+				close(test_sock);
+				if (_ai->ai_family == AF_INET6) {
+					ai = _ai;
 					break;
+				}
+				if (!ai) {
+					ai = _ai;
+				}
 			}
-			if (!ai)
-				ai = _ai;
+			if (!ai) { /* unlikely */
+				return EAFNOSUPPORT;
+			}
 		}
 	}
 #if DUMP_ADDRINFO
@@ -4995,16 +5007,6 @@ static void __attribute__ ((constructor)) cs_init(void)
 	pthread_mutex_init(&xprt_list_lock, 0);
 	pthread_mutex_init(&ldms_zap_list_lock, 0);
 	(void)clock_gettime(CLOCK_REALTIME, &xprt_start);
-
-	/* check if IPv6 is supported */
-	int sd;
-	sd = socket(AF_INET6, SOCK_STREAM, 0);
-	if (sd >= 0) {
-		close(sd);
-		ipv6_enabled = 1;
-	} else {
-		ipv6_enabled = 0;
-	}
 }
 
 static void __attribute__ ((destructor)) cs_term(void)
